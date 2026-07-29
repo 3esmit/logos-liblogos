@@ -3,6 +3,7 @@
 
 #include "module_loader.h"
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -39,6 +40,18 @@ struct ModuleInfo {
     // module's uptime from it (now - loadedAt), valid only while loaded.
     int64_t loadedAt = 0;
     // Null when loaded directly via markLoaded(name) (test/external scenarios).
+    std::shared_ptr<LogosCore::ModuleLoader> loader;
+    LogosCore::LoadedModuleHandle handle;
+};
+
+// Runtime-only state for one complete module address. Package metadata above
+// stays keyed by module name; this record is deliberately separate so a
+// second instance cannot overwrite a sibling's loader, handle, or lifecycle
+// timestamp.
+struct ModuleRuntimeInfo {
+    uint64_t generation = 0;
+    bool loading = false;
+    int64_t loadedAt = 0;
     std::shared_ptr<LogosCore::ModuleLoader> loader;
     LogosCore::LoadedModuleHandle handle;
 };
@@ -94,6 +107,27 @@ public:
     // loaded without a loader association (e.g. via markLoaded(name) only).
     std::shared_ptr<LogosCore::ModuleLoader> loaderFor(const std::string& name) const;
 
+    // Reserve an address before handing it to an asynchronous loader. The
+    // generation returned here is captured by the termination callback, so a
+    // callback from an old process can never erase a replacement at the same
+    // address. std::nullopt means the address is already loading or loaded.
+    std::optional<uint64_t> reserveRuntime(const LogosCore::ModuleAddress& address);
+    void cancelRuntime(const LogosCore::ModuleAddress& address, uint64_t generation);
+    bool completeRuntime(const LogosCore::ModuleAddress& address,
+                         uint64_t generation,
+                         std::shared_ptr<LogosCore::ModuleLoader> loader,
+                         LogosCore::LoadedModuleHandle handle);
+    void markRuntimeUnloaded(const LogosCore::ModuleAddress& address);
+    void markRuntimeUnloadedIfGeneration(const LogosCore::ModuleAddress& address,
+                                         uint64_t generation);
+    bool isRuntimeLoaded(const LogosCore::ModuleAddress& address) const;
+    std::shared_ptr<LogosCore::ModuleLoader>
+    loaderForRuntime(const LogosCore::ModuleAddress& address) const;
+
+    // Additive runtime inspection. Unlike allModulesInfo(), this reports
+    // every loaded address, including explicit sibling instances.
+    nlohmann::json allRuntimeInstancesInfo() const;
+
     void clear();
 
 private:
@@ -120,10 +154,16 @@ private:
                                                       bool recursive) const;
     std::vector<std::string> moduleDependentsLocked(const std::string& name,
                                                     bool recursive) const;
+    bool hasActiveRuntimeForModuleLocked(const std::string& name) const;
+    void syncDefaultRuntimeToModuleInfoLocked(const LogosCore::ModuleAddress& address,
+                                              const ModuleRuntimeInfo* runtime);
 
     mutable std::shared_mutex m_mutex;
     std::vector<std::string> m_modulesDirs;
     std::unordered_map<std::string, ModuleInfo> m_modules;
+    std::unordered_map<LogosCore::ModuleAddress, ModuleRuntimeInfo,
+                       LogosCore::ModuleAddressHash> m_runtimes;
+    uint64_t m_nextRuntimeGeneration = 1;
 };
 
 #endif // MODULE_REGISTRY_H

@@ -100,7 +100,7 @@ void ModuleRegistry::discoverInstalledModules() {
     // evict the entry.
     std::vector<std::string> toRemove;
     for (const auto& [name, info] : m_modules) {
-        if (scannedNames.count(name) == 0 && !info.loaded)
+        if (scannedNames.count(name) == 0 && !hasActiveRuntimeForModuleLocked(name))
             toRemove.push_back(name);
     }
     for (const std::string& name : toRemove) {
@@ -360,20 +360,31 @@ static int64_t nowUnixSeconds() {
 
 void ModuleRegistry::markLoaded(const std::string& name) {
     std::unique_lock lock(m_mutex);
-    auto& info = m_modules[name];
-    info.loaded = true;
-    info.loadedAt = nowUnixSeconds();
+    const LogosCore::ModuleAddress address{name, {}};
+    ModuleRuntimeInfo& runtime = m_runtimes[address];
+    runtime.generation = m_nextRuntimeGeneration++;
+    runtime.loading = false;
+    runtime.loadedAt = nowUnixSeconds();
+    runtime.loader.reset();
+    runtime.handle = {};
+    runtime.handle.name = name;
+    syncDefaultRuntimeToModuleInfoLocked(address, &runtime);
 }
 
 void ModuleRegistry::markLoaded(const std::string& name,
                                  std::shared_ptr<LogosCore::ModuleLoader> loader,
                                  LogosCore::LoadedModuleHandle handle) {
     std::unique_lock lock(m_mutex);
-    auto& info = m_modules[name];
-    info.loaded = true;
-    info.loadedAt = nowUnixSeconds();
-    info.loader = std::move(loader);
-    info.handle = std::move(handle);
+    const LogosCore::ModuleAddress address{name, {}};
+    ModuleRuntimeInfo& runtime = m_runtimes[address];
+    runtime.generation = m_nextRuntimeGeneration++;
+    runtime.loading = false;
+    runtime.loadedAt = nowUnixSeconds();
+    runtime.loader = std::move(loader);
+    runtime.handle = std::move(handle);
+    runtime.handle.name = name;
+    runtime.handle.instanceId.clear();
+    syncDefaultRuntimeToModuleInfoLocked(address, &runtime);
 }
 
 std::shared_ptr<LogosCore::ModuleLoader>
@@ -386,11 +397,9 @@ ModuleRegistry::loaderFor(const std::string& name) const {
 
 void ModuleRegistry::markUnloaded(const std::string& name) {
     std::unique_lock lock(m_mutex);
-    auto it = m_modules.find(name);
-    if (it != m_modules.end()) {
-        it->second.loaded = false;
-        it->second.loadedAt = 0;
-    }
+    const LogosCore::ModuleAddress address{name, {}};
+    m_runtimes.erase(address);
+    syncDefaultRuntimeToModuleInfoLocked(address, nullptr);
 }
 
 std::vector<std::string> ModuleRegistry::loadedModuleNames() const {
@@ -405,12 +414,159 @@ std::vector<std::string> ModuleRegistry::loadedModuleNames() const {
 
 void ModuleRegistry::clearLoaded() {
     std::unique_lock lock(m_mutex);
-    for (auto& [k, v] : m_modules)
+    m_runtimes.clear();
+    for (auto& [k, v] : m_modules) {
         v.loaded = false;
+        v.loadedAt = 0;
+        v.loader.reset();
+        v.handle = {};
+    }
+}
+
+bool ModuleRegistry::hasActiveRuntimeForModuleLocked(const std::string& name) const {
+    return std::any_of(m_runtimes.begin(), m_runtimes.end(),
+        [&name](const auto& entry) {
+            return entry.first.moduleName == name;
+        });
+}
+
+void ModuleRegistry::syncDefaultRuntimeToModuleInfoLocked(
+    const LogosCore::ModuleAddress& address,
+    const ModuleRuntimeInfo* runtime) {
+    if (!address.isDefaultInstance()) return;
+
+    ModuleInfo& info = m_modules[address.moduleName];
+    const bool loaded = runtime && !runtime->loading;
+    info.loaded = loaded;
+    info.loadedAt = loaded ? runtime->loadedAt : 0;
+    info.loader = loaded ? runtime->loader : nullptr;
+    info.handle = loaded ? runtime->handle : LogosCore::LoadedModuleHandle{};
+}
+
+std::optional<uint64_t> ModuleRegistry::reserveRuntime(
+    const LogosCore::ModuleAddress& address) {
+    if (!address.isValid()) return std::nullopt;
+
+    std::unique_lock lock(m_mutex);
+    if (m_runtimes.count(address) != 0)
+        return std::nullopt;
+
+    ModuleRuntimeInfo runtime;
+    runtime.generation = m_nextRuntimeGeneration++;
+    runtime.loading = true;
+    const uint64_t generation = runtime.generation;
+    m_runtimes.emplace(address, std::move(runtime));
+    return generation;
+}
+
+void ModuleRegistry::cancelRuntime(const LogosCore::ModuleAddress& address,
+                                   uint64_t generation) {
+    std::unique_lock lock(m_mutex);
+    const auto it = m_runtimes.find(address);
+    if (it == m_runtimes.end() || it->second.generation != generation)
+        return;
+
+    m_runtimes.erase(it);
+    syncDefaultRuntimeToModuleInfoLocked(address, nullptr);
+}
+
+bool ModuleRegistry::completeRuntime(
+    const LogosCore::ModuleAddress& address,
+    uint64_t generation,
+    std::shared_ptr<LogosCore::ModuleLoader> loader,
+    LogosCore::LoadedModuleHandle handle) {
+    std::unique_lock lock(m_mutex);
+    const auto it = m_runtimes.find(address);
+    if (it == m_runtimes.end() || it->second.generation != generation || !it->second.loading)
+        return false;
+
+    // The loader must preserve the address it was asked to launch. Accept an
+    // omitted name only for old test doubles, then normalize it; an explicit
+    // instance ID, however, must never be silently collapsed to default.
+    if (handle.name.empty()) handle.name = address.moduleName;
+    if (handle.name != address.moduleName || handle.instanceId != address.instanceId) {
+        spdlog::error("Loader returned a handle for a different runtime address");
+        m_runtimes.erase(it);
+        syncDefaultRuntimeToModuleInfoLocked(address, nullptr);
+        return false;
+    }
+
+    ModuleRuntimeInfo& runtime = it->second;
+    runtime.loading = false;
+    runtime.loadedAt = nowUnixSeconds();
+    runtime.loader = std::move(loader);
+    runtime.handle = std::move(handle);
+    syncDefaultRuntimeToModuleInfoLocked(address, &runtime);
+    return true;
+}
+
+void ModuleRegistry::markRuntimeUnloaded(const LogosCore::ModuleAddress& address) {
+    std::unique_lock lock(m_mutex);
+    m_runtimes.erase(address);
+    syncDefaultRuntimeToModuleInfoLocked(address, nullptr);
+}
+
+void ModuleRegistry::markRuntimeUnloadedIfGeneration(
+    const LogosCore::ModuleAddress& address,
+    uint64_t generation) {
+    std::unique_lock lock(m_mutex);
+    const auto it = m_runtimes.find(address);
+    if (it == m_runtimes.end() || it->second.generation != generation)
+        return;
+
+    m_runtimes.erase(it);
+    syncDefaultRuntimeToModuleInfoLocked(address, nullptr);
+}
+
+bool ModuleRegistry::isRuntimeLoaded(const LogosCore::ModuleAddress& address) const {
+    std::shared_lock lock(m_mutex);
+    const auto it = m_runtimes.find(address);
+    return it != m_runtimes.end() && !it->second.loading;
+}
+
+std::shared_ptr<LogosCore::ModuleLoader>
+ModuleRegistry::loaderForRuntime(const LogosCore::ModuleAddress& address) const {
+    std::shared_lock lock(m_mutex);
+    const auto it = m_runtimes.find(address);
+    if (it == m_runtimes.end() || it->second.loading)
+        return nullptr;
+    return it->second.loader;
+}
+
+nlohmann::json ModuleRegistry::allRuntimeInstancesInfo() const {
+    std::shared_lock lock(m_mutex);
+    std::vector<std::pair<LogosCore::ModuleAddress, const ModuleRuntimeInfo*>> runtimes;
+    runtimes.reserve(m_runtimes.size());
+    for (const auto& [address, runtime] : m_runtimes) {
+        if (!runtime.loading)
+            runtimes.emplace_back(address, &runtime);
+    }
+    std::sort(runtimes.begin(), runtimes.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.first.moduleName != rhs.first.moduleName)
+            return lhs.first.moduleName < rhs.first.moduleName;
+        return lhs.first.instanceId < rhs.first.instanceId;
+    });
+
+    nlohmann::json result = nlohmann::json::array();
+    for (const auto& [address, runtime] : runtimes) {
+        result.push_back({
+            {"module_name", address.moduleName},
+            {"instance_id", address.instanceId},
+            {"default_instance", address.isDefaultInstance()},
+            {"loaded_at", runtime->loadedAt},
+            {"pid", runtime->handle.pid},
+            {"endpoint", runtime->handle.endpoint},
+        });
+    }
+    return result;
 }
 
 void ModuleRegistry::clear() {
     std::unique_lock lock(m_mutex);
     m_modulesDirs.clear();
     m_modules.clear();
+    m_runtimes.clear();
+    // Do not reset m_nextRuntimeGeneration: a container callback can arrive
+    // after clear() and must never collide with a newly launched runtime in a
+    // subsequent core lifetime inside the same process.
 }

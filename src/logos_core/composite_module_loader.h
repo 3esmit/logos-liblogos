@@ -11,7 +11,7 @@ namespace LogosCore {
 // Pairs a ModuleContainer (where/how to run) with a ModuleFormatLoader (what to
 // load) and presents the combined result as a single ModuleLoader — the
 // interface that ModuleLoaderRegistry and ModuleManager already understand.
-class CompositeModuleLoader : public ModuleLoader {
+class CompositeModuleLoader : public InstanceAwareModuleLoader {
 public:
     CompositeModuleLoader(std::shared_ptr<ModuleContainer> container,
                           std::shared_ptr<ModuleFormatLoader> loader);
@@ -30,10 +30,23 @@ public:
     std::optional<int64_t> pid(const std::string& name) const override;
     std::unordered_map<std::string, int64_t> getAllPids() const override;
 
+    bool loadInstance(const ModuleDescriptor& desc,
+                      std::function<void(const ModuleAddress& address)> onTerminated,
+                      LoadedModuleHandle& out) override;
+    bool sendTokenToInstance(const ModuleAddress& address,
+                             const std::string& token) override;
+    bool terminateInstance(const ModuleAddress& address) override;
+    bool hasInstance(const ModuleAddress& address) const override;
+    std::optional<int64_t> instancePid(const ModuleAddress& address) const override;
+    std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash>
+    getAllInstancePids() const override;
+
     ModuleContainer& container() { return *container_; }
     const ModuleContainer& container() const { return *container_; }
 
 private:
+    InstanceAwareModuleContainer* instanceContainer() const;
+
     std::shared_ptr<ModuleContainer> container_;
     std::shared_ptr<ModuleFormatLoader> loader_;
 };

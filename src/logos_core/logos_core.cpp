@@ -50,11 +50,33 @@ int logos_core_load_module(const char* module_name, bool with_dependencies) {
     return ModuleManager::loadModule(module_name) ? 1 : 0;
 }
 
+int logos_core_load_module_instance(const char* module_name,
+                                    const char* instance_id,
+                                    bool with_dependencies) {
+    if (!module_name) {
+        logos::logger("core").critical(
+            "logos_core_load_module_instance: module_name must not be null");
+        std::abort();
+    }
+    return ModuleManager::loadModuleInstance(module_name, instance_id, with_dependencies) ? 1 : 0;
+}
+
 int logos_core_unload_module(const char* module_name, bool with_dependents) {
     if (!module_name) { logos::logger("core").critical("logos_core_unload_module: module_name must not be null"); std::abort(); }
     if (with_dependents)
         return ModuleManager::unloadModuleWithDependents(module_name) ? 1 : 0;
     return ModuleManager::unloadModule(module_name) ? 1 : 0;
+}
+
+int logos_core_unload_module_instance(const char* module_name,
+                                      const char* instance_id,
+                                      bool with_dependents) {
+    if (!module_name) {
+        logos::logger("core").critical(
+            "logos_core_unload_module_instance: module_name must not be null");
+        std::abort();
+    }
+    return ModuleManager::unloadModuleInstance(module_name, instance_id, with_dependents) ? 1 : 0;
 }
 
 char** logos_core_get_module_dependencies(const char* module_name, bool recursive) {
@@ -69,6 +91,21 @@ char** logos_core_get_module_dependents(const char* module_name, bool recursive)
 
 char* logos_core_get_modules_info() {
     return ModuleManager::getModulesInfoCStr();
+}
+
+char* logos_core_get_module_instances_info() {
+    return ModuleManager::getModuleInstancesInfoCStr();
+}
+
+int logos_core_is_module_instance_loaded(const char* module_name,
+                                         const char* instance_id) {
+    if (!module_name) {
+        logos::logger("core").critical(
+            "logos_core_is_module_instance_loaded: module_name must not be null");
+        std::abort();
+    }
+    return ModuleManager::isModuleInstanceLoaded(
+        std::string(module_name), instance_id ? std::string(instance_id) : std::string{}) ? 1 : 0;
 }
 
 char* logos_core_process_module(const char* module_path) {
@@ -104,6 +141,20 @@ void logos_core_set_module_transports(const char* module_name,
     }
     ModuleManager::setModuleTransports(
         std::string(module_name),
+        transport_set_json ? std::string(transport_set_json) : std::string{});
+}
+
+void logos_core_set_module_instance_transports(const char* module_name,
+                                               const char* instance_id,
+                                               const char* transport_set_json) {
+    if (!module_name) {
+        logos::logger("core").critical(
+            "logos_core_set_module_instance_transports: module_name must not be null");
+        std::abort();
+    }
+    ModuleManager::setModuleInstanceTransports(
+        std::string(module_name),
+        instance_id ? std::string(instance_id) : std::string{},
         transport_set_json ? std::string(transport_set_json) : std::string{});
 }
 

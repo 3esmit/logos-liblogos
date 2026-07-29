@@ -17,11 +17,17 @@
 #include "module_loader_registry.h"
 #include "module_loader.h"
 #include "subprocess_manager.h"
+#include "logos_api_client.h"
+#include "token_manager.h"
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <nlohmann/json.hpp>
 
 using namespace LogosCore;
 
@@ -32,7 +38,7 @@ using namespace LogosCore;
 // ---------------------------------------------------------------------------
 namespace {
 
-struct FakeModuleLoader : public ModuleLoader {
+struct FakeModuleLoader : public InstanceAwareModuleLoader {
     std::string id() const override { return "fake"; }
 
     bool canHandle(const ModuleDescriptor&) const override { return true; }
@@ -62,22 +68,82 @@ struct FakeModuleLoader : public ModuleLoader {
     void terminateAll() override {
         terminateAllCount++;
         activeModules.clear();
+        activeInstances.clear();
     }
 
     bool hasModule(const std::string& name) const override {
         return activeModules.count(name) > 0;
     }
 
+    bool loadInstance(const ModuleDescriptor& desc,
+                      std::function<void(const ModuleAddress&)> onTerminated,
+                      LoadedModuleHandle& out) override {
+        const ModuleAddress address = desc.address();
+        if (!address.isValid() || failInstances.count(address) || activeInstances.count(address))
+            return false;
+        instanceLoadCalls.push_back(desc);
+        out.name = address.moduleName;
+        out.instanceId = address.instanceId;
+        out.pid = 2000 + static_cast<int64_t>(instanceLoadCalls.size());
+        out.endpoint = "fake://" + address.moduleName + "/" + address.instanceId;
+        activeInstances.insert(address);
+        instanceCallbacks[address] = std::move(onTerminated);
+        return true;
+    }
+
+    bool sendTokenToInstance(const ModuleAddress& address,
+                             const std::string& token) override {
+        if (activeInstances.count(address) == 0) return false;
+        instanceTokenCalls.push_back({address, token});
+        return true;
+    }
+
+    bool terminateInstance(const ModuleAddress& address) override {
+        instanceTerminateCalls.push_back(address);
+        return activeInstances.erase(address) > 0;
+    }
+
+    bool hasInstance(const ModuleAddress& address) const override {
+        return activeInstances.count(address) > 0;
+    }
+
+    std::optional<int64_t> instancePid(const ModuleAddress& address) const override {
+        if (activeInstances.count(address) == 0) return std::nullopt;
+        return 2000;
+    }
+
+    std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash>
+    getAllInstancePids() const override {
+        std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash> result;
+        for (const auto& address : activeInstances)
+            result.emplace(address, 2000);
+        return result;
+    }
+
+    std::function<void(const ModuleAddress&)> callbackFor(const ModuleAddress& address) const {
+        const auto it = instanceCallbacks.find(address);
+        return it == instanceCallbacks.end()
+            ? std::function<void(const ModuleAddress&)>{}
+            : it->second;
+    }
+
     // Call records
     std::vector<std::string>                         loadCalls;
     std::vector<std::pair<std::string,std::string>>  sendTokenCalls;
     std::vector<std::string>                         terminateCalls;
+    std::vector<ModuleDescriptor>                     instanceLoadCalls;
+    std::vector<std::pair<ModuleAddress, std::string>> instanceTokenCalls;
+    std::vector<ModuleAddress>                        instanceTerminateCalls;
     int                                              terminateAllCount = 0;
 
     // Modules to fail on load
     std::unordered_set<std::string>                  failOn;
+    std::unordered_set<ModuleAddress, ModuleAddressHash> failInstances;
     // Modules currently "running"
     std::unordered_set<std::string>                  activeModules;
+    std::unordered_set<ModuleAddress, ModuleAddressHash> activeInstances;
+    std::unordered_map<ModuleAddress, std::function<void(const ModuleAddress&)>,
+                       ModuleAddressHash> instanceCallbacks;
 };
 
 } // anonymous namespace
@@ -89,6 +155,7 @@ struct FakeModuleLoader : public ModuleLoader {
 class ModuleLoaderAbstractionTest : public ::testing::Test {
 protected:
     std::shared_ptr<FakeModuleLoader> fake;
+    std::filesystem::path persistenceRoot;
 
     void SetUp() override {
         logos_core_terminate_all();
@@ -98,6 +165,13 @@ protected:
         fake = std::make_shared<FakeModuleLoader>();
         ModuleManager::loaders().clearForTests();
         ModuleManager::loaders().registerLoader(fake);
+
+        persistenceRoot = std::filesystem::temp_directory_path() /
+            ("logos-liblogos-instance-test-" +
+             std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+        std::filesystem::remove_all(persistenceRoot);
+        const std::string root = persistenceRoot.string();
+        logos_core_set_persistence_base_path(root.c_str());
     }
 
     void TearDown() override {
@@ -108,6 +182,7 @@ protected:
         ModuleManager::loaders().clearForTests();
         ModuleManager::loaders().registerLoader(
             std::make_shared<SubprocessManager>());
+        std::filesystem::remove_all(persistenceRoot);
     }
 
     void registerModule(const std::string& name,
@@ -180,6 +255,165 @@ TEST_F(ModuleLoaderAbstractionTest, UnloadModule_MarksModuleAsUnloaded) {
     logos_core_unload_module("foo", false);
 
     EXPECT_EQ(logos_core_is_module_loaded("foo"), 0);
+}
+
+// =============================================================================
+// Explicit runtime-instance routing
+// =============================================================================
+
+TEST_F(ModuleLoaderAbstractionTest,
+       ScopedInstances_KeepPersistenceTransportTokenAndInspectionSeparate) {
+    registerModule("lez_indexer_module");
+    const ModuleAddress alpha{"lez_indexer_module", "zone_alpha"};
+    const ModuleAddress beta{"lez_indexer_module", "zone_beta"};
+
+    logos_core_set_module_instance_transports(
+        alpha.moduleName.c_str(), alpha.instanceId.c_str(), "[\"alpha-transport\"]");
+    logos_core_set_module_instance_transports(
+        beta.moduleName.c_str(), beta.instanceId.c_str(), "[\"beta-transport\"]");
+
+    ASSERT_EQ(logos_core_load_module_instance(
+                  alpha.moduleName.c_str(), alpha.instanceId.c_str(), false), 1);
+    ASSERT_EQ(logos_core_load_module_instance(
+                  beta.moduleName.c_str(), beta.instanceId.c_str(), false), 1);
+
+    ASSERT_EQ(fake->instanceLoadCalls.size(), 2u);
+    EXPECT_EQ(fake->instanceLoadCalls[0].address(), alpha);
+    EXPECT_EQ(fake->instanceLoadCalls[1].address(), beta);
+    EXPECT_EQ(fake->instanceLoadCalls[0].transportSetJson, "[\"alpha-transport\"]");
+    EXPECT_EQ(fake->instanceLoadCalls[1].transportSetJson, "[\"beta-transport\"]");
+    EXPECT_EQ(fake->instanceLoadCalls[0].instancePersistencePath,
+              (persistenceRoot / alpha.moduleName / alpha.instanceId).string());
+    EXPECT_EQ(fake->instanceLoadCalls[1].instancePersistencePath,
+              (persistenceRoot / beta.moduleName / beta.instanceId).string());
+
+    ASSERT_EQ(fake->instanceTokenCalls.size(), 2u);
+    EXPECT_EQ(fake->instanceTokenCalls[0].first, alpha);
+    EXPECT_EQ(fake->instanceTokenCalls[1].first, beta);
+    EXPECT_NE(fake->instanceTokenCalls[0].second, fake->instanceTokenCalls[1].second);
+    const std::string alphaTokenKey = logos::scopedModuleTokenKey(
+        QString::fromStdString(alpha.moduleName),
+        QString::fromStdString(alpha.instanceId)).toStdString();
+    const std::string betaTokenKey = logos::scopedModuleTokenKey(
+        QString::fromStdString(beta.moduleName),
+        QString::fromStdString(beta.instanceId)).toStdString();
+    EXPECT_EQ(TokenManager::instance().getToken(alphaTokenKey),
+              fake->instanceTokenCalls[0].second);
+    EXPECT_EQ(TokenManager::instance().getToken(betaTokenKey),
+              fake->instanceTokenCalls[1].second);
+
+    EXPECT_EQ(logos_core_is_module_instance_loaded(
+                  alpha.moduleName.c_str(), alpha.instanceId.c_str()), 1);
+    EXPECT_EQ(logos_core_is_module_instance_loaded(
+                  beta.moduleName.c_str(), beta.instanceId.c_str()), 1);
+    // The legacy name-only state describes only the default runtime.
+    EXPECT_EQ(logos_core_is_module_loaded("lez_indexer_module"), 0);
+
+    char* rawInfo = logos_core_get_module_instances_info();
+    ASSERT_NE(rawInfo, nullptr);
+    const nlohmann::json info = nlohmann::json::parse(rawInfo);
+    delete[] rawInfo;
+    ASSERT_EQ(info.size(), 2u);
+    EXPECT_EQ(info[0]["module_name"], alpha.moduleName);
+    EXPECT_EQ(info[0]["instance_id"], alpha.instanceId);
+    EXPECT_EQ(info[1]["module_name"], beta.moduleName);
+    EXPECT_EQ(info[1]["instance_id"], beta.instanceId);
+
+    // Explicit creation is intentionally not idempotent: a caller gets a
+    // deterministic failure rather than falsely believing it created a third
+    // Zone runtime at the same address.
+    EXPECT_EQ(logos_core_load_module_instance(
+                  alpha.moduleName.c_str(), alpha.instanceId.c_str(), false), 0);
+}
+
+TEST_F(ModuleLoaderAbstractionTest,
+       ScopedInstance_TerminationCannotClearSiblingOrReplacement) {
+    registerModule("lez_indexer_module");
+    const ModuleAddress alpha{"lez_indexer_module", "zone_alpha"};
+    const ModuleAddress beta{"lez_indexer_module", "zone_beta"};
+
+    ASSERT_EQ(logos_core_load_module_instance(
+                  alpha.moduleName.c_str(), alpha.instanceId.c_str(), false), 1);
+    ASSERT_EQ(logos_core_load_module_instance(
+                  beta.moduleName.c_str(), beta.instanceId.c_str(), false), 1);
+    const auto staleAlphaCallback = fake->callbackFor(alpha);
+    ASSERT_TRUE(staleAlphaCallback);
+
+    // A crash notification for alpha leaves beta intact.
+    staleAlphaCallback(alpha);
+    EXPECT_EQ(logos_core_is_module_instance_loaded(
+                  alpha.moduleName.c_str(), alpha.instanceId.c_str()), 0);
+    EXPECT_EQ(logos_core_is_module_instance_loaded(
+                  beta.moduleName.c_str(), beta.instanceId.c_str()), 1);
+
+    // Simulate the container reaping the old process before the next launch.
+    fake->activeInstances.erase(alpha);
+    ASSERT_EQ(logos_core_load_module_instance(
+                  alpha.moduleName.c_str(), alpha.instanceId.c_str(), false), 1);
+    EXPECT_EQ(logos_core_is_module_instance_loaded(
+                  alpha.moduleName.c_str(), alpha.instanceId.c_str()), 1);
+
+    // A delayed callback from the old alpha generation must not erase the
+    // replacement at the same address.
+    staleAlphaCallback(alpha);
+    EXPECT_EQ(logos_core_is_module_instance_loaded(
+                  alpha.moduleName.c_str(), alpha.instanceId.c_str()), 1);
+    EXPECT_EQ(logos_core_is_module_instance_loaded(
+                  beta.moduleName.c_str(), beta.instanceId.c_str()), 1);
+}
+
+TEST_F(ModuleLoaderAbstractionTest,
+       ScopedInstance_CallbackAfterCoreClearCannotClearNewLifetime) {
+    registerModule("lez_indexer_module");
+    const ModuleAddress alpha{"lez_indexer_module", "zone_alpha"};
+    ASSERT_EQ(logos_core_load_module_instance(
+                  alpha.moduleName.c_str(), alpha.instanceId.c_str(), false), 1);
+    const auto staleCallback = fake->callbackFor(alpha);
+    ASSERT_TRUE(staleCallback);
+
+    // clear() is a real daemon-restart boundary, but process exit callbacks
+    // are asynchronous and can arrive afterwards.
+    logos_core_clear();
+    registerModule("lez_indexer_module");
+    ASSERT_EQ(logos_core_load_module_instance(
+                  alpha.moduleName.c_str(), alpha.instanceId.c_str(), false), 1);
+
+    staleCallback(alpha);
+    EXPECT_EQ(logos_core_is_module_instance_loaded(
+                  alpha.moduleName.c_str(), alpha.instanceId.c_str()), 1);
+}
+
+TEST_F(ModuleLoaderAbstractionTest,
+       ScopedInstance_ValidatesAddressAndKeepsDefaultCompatibilityPath) {
+    registerModule("lez_indexer_module");
+
+    EXPECT_EQ(logos_core_load_module_instance("lez_indexer_module", "bad/id", false), 0);
+    EXPECT_EQ(logos_core_load_module_instance("", "zone_alpha", false), 0);
+
+    // Empty instance IDs explicitly select the established default runtime.
+    EXPECT_EQ(logos_core_load_module_instance("lez_indexer_module", "", false), 1);
+    EXPECT_EQ(logos_core_is_module_loaded("lez_indexer_module"), 1);
+    EXPECT_EQ(logos_core_is_module_instance_loaded("lez_indexer_module", ""), 1);
+    EXPECT_EQ(logos_core_load_module_instance("lez_indexer_module", nullptr, false), 1);
+}
+
+TEST_F(ModuleLoaderAbstractionTest,
+       ScopedInstance_LoadsSharedDependenciesButNeverCascadesThemOnUnload) {
+    registerModule("storage_module");
+    registerModule("lez_indexer_module", {"storage_module"});
+    const ModuleAddress indexer{"lez_indexer_module", "zone_alpha"};
+
+    ASSERT_EQ(logos_core_load_module_instance(
+                  indexer.moduleName.c_str(), indexer.instanceId.c_str(), true), 1);
+    EXPECT_EQ(logos_core_is_module_loaded("storage_module"), 1);
+    EXPECT_EQ(logos_core_is_module_instance_loaded(
+                  indexer.moduleName.c_str(), indexer.instanceId.c_str()), 1);
+
+    EXPECT_EQ(logos_core_unload_module_instance(
+                  indexer.moduleName.c_str(), indexer.instanceId.c_str(), true), 0);
+    EXPECT_EQ(logos_core_unload_module_instance(
+                  indexer.moduleName.c_str(), indexer.instanceId.c_str(), false), 1);
+    EXPECT_EQ(logos_core_is_module_loaded("storage_module"), 1);
 }
 
 // =============================================================================

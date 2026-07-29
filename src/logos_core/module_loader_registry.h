@@ -34,9 +34,19 @@ public:
     // module (e.g. loaded via markLoaded(name) directly).
     bool terminate(const std::string& name);
 
+    // Address-aware counterpart for an explicitly scoped runtime. Only loaders
+    // that opt into InstanceAwareModuleLoader participate; a name-only loader
+    // is never asked to guess which sibling instance to terminate.
+    bool terminateInstance(const ModuleAddress& address);
+
     // Aggregate getAllPids() across all loaders. Later-registered loaders win on
     // name collision (should not happen in practice).
     std::unordered_map<std::string, int64_t> getAllPids() const;
+
+    // Aggregate explicit-instance PID mappings. This deliberately does not
+    // fold addresses back into names: two sibling instances must stay distinct.
+    std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash>
+    getAllInstancePids() const;
 
     // Testing hook: remove all loaders so a test can install a FakeModuleLoader
     // without triggering any real Qt subprocess side effects.

@@ -57,6 +57,31 @@ public:
     virtual std::unordered_map<std::string, int64_t> getAllPids() const { return {}; }
 };
 
+// Optional extension for loaders that can host more than one runtime for the
+// same package.  It deliberately derives from the unchanged name-only loader
+// contract: existing loader binaries keep serving the legacy/default instance,
+// while the core opts into this interface only for an explicit instance ID.
+class InstanceAwareModuleLoader : public ModuleLoader {
+public:
+    virtual bool loadInstance(
+        const ModuleDescriptor& desc,
+        std::function<void(const ModuleAddress& address)> onTerminated,
+        LoadedModuleHandle& out) = 0;
+
+    virtual bool sendTokenToInstance(const ModuleAddress& address,
+                                     const std::string& token) = 0;
+
+    virtual bool terminateInstance(const ModuleAddress& address) = 0;
+
+    virtual bool hasInstance(const ModuleAddress& address) const = 0;
+
+    virtual std::optional<int64_t> instancePid(
+        const ModuleAddress& address) const = 0;
+
+    virtual std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash>
+    getAllInstancePids() const = 0;
+};
+
 } // namespace LogosCore
 
 #endif // MODULE_LOADER_H
