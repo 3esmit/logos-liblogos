@@ -40,6 +40,13 @@ namespace ModuleManager {
     void setModuleTransports(const std::string& moduleName,
                              const std::string& transportSetJson);
 
+    // Address-aware transport override. An empty instance ID selects the
+    // legacy/default runtime; a non-empty ID stays isolated from sibling
+    // instances of the same module package.
+    void setModuleInstanceTransports(const std::string& moduleName,
+                                     const std::string& instanceId,
+                                     const std::string& transportSetJson);
+
     // Store the inter-module access policy (the raw JSON document set via
     // logos_core_set_access_policy). Core parses it and registers the
     // concrete per-target restrictions with capability_module once that
@@ -57,8 +64,22 @@ namespace ModuleManager {
     char* processModuleCStr(const char* modulePath);
     bool loadModule(const char* moduleName);
     bool loadModuleWithDependencies(const char* moduleName);
+
+    // Load an explicitly addressed runtime. The default instance remains the
+    // legacy idempotent path; an already-running explicit address is refused
+    // so callers cannot mistake a no-op for a newly created Zone runtime.
+    bool loadModuleInstance(const char* moduleName,
+                            const char* instanceId,
+                            bool withDependencies);
     bool initializeCapabilityModule();
     bool unloadModule(const char* moduleName);
+
+    // Explicit-instance unload never cascades package dependents: dependency
+    // metadata is package-scoped and those shared default runtimes may serve
+    // sibling instances. withDependents is accepted only for the default path.
+    bool unloadModuleInstance(const char* moduleName,
+                              const char* instanceId,
+                              bool withDependents);
 
     // Cascading unload: unload the named module together with every currently
     // loaded module that (transitively) depends on it. The order is
@@ -74,6 +95,8 @@ namespace ModuleManager {
     char** getKnownModulesCStr();
 
     bool isModuleLoaded(const std::string& name);
+    bool isModuleInstanceLoaded(const std::string& moduleName,
+                                const std::string& instanceId);
     std::unordered_map<std::string, int64_t> getModuleProcessIds();
 
     std::vector<std::string> resolveDependencies(const std::vector<std::string>& requestedModules);
@@ -103,6 +126,9 @@ namespace ModuleManager {
     std::string getModulesInfoJson();
     // char* variant. Caller owns the returned string. Never null.
     char* getModulesInfoCStr();
+
+    std::string getModuleInstancesInfoJson();
+    char* getModuleInstancesInfoCStr();
 }
 
 #endif // MODULE_MANAGER_H

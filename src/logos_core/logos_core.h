@@ -50,12 +50,32 @@ LOGOS_CORE_EXPORT char** logos_core_get_known_modules();
 // Aborts the process if `module_name` is NULL.
 LOGOS_CORE_EXPORT int logos_core_load_module(const char* module_name, bool with_dependencies);
 
+// Load one explicitly addressed module runtime. `instance_id` is a separate,
+// validated address segment; NULL or "" selects the existing default instance
+// and therefore preserves logos_core_load_module semantics. A non-empty
+// instance ID creates one independent runtime and returns 0 when that exact
+// address is already running, rather than pretending a new runtime was made.
+// Dependencies remain package-scoped and are loaded as default instances.
+// Returns 0 for an invalid/unknown address or a failed load.
+LOGOS_CORE_EXPORT int logos_core_load_module_instance(const char* module_name,
+                                                      const char* instance_id,
+                                                      bool with_dependencies);
+
 // Unload a specific module by name.
 // When with_dependents is true, also unloads every loaded module that
 // (transitively) depends on it. Dependents come down first (leaves-first)
 // so no process is briefly pointing at a terminated parent.
 // Returns 1 if successful, 0 if failed
 LOGOS_CORE_EXPORT int logos_core_unload_module(const char* module_name, bool with_dependents);
+
+// Unload one explicitly addressed module runtime. NULL or "" instance_id
+// selects the legacy/default instance. Cascading dependents is supported only
+// for that default path because dependency metadata is package-scoped and may
+// be shared by sibling explicit instances. Returns 0 for an invalid address,
+// an absent runtime, or a scoped request with with_dependents=true.
+LOGOS_CORE_EXPORT int logos_core_unload_module_instance(const char* module_name,
+                                                        const char* instance_id,
+                                                        bool with_dependents);
 
 // Return the modules that `module_name` depends on (forward edges).
 // If `recursive` is true, returns the full transitive dependency closure
@@ -83,6 +103,18 @@ LOGOS_CORE_EXPORT char** logos_core_get_module_dependents(const char* module_nam
 //                  type, description, dependencies, …), or null if unreadable
 // The returned string must be freed by the caller.
 LOGOS_CORE_EXPORT char* logos_core_get_modules_info();
+
+// Get every active runtime as a JSON array. Each entry contains module_name,
+// instance_id, default_instance, loaded_at, pid, and endpoint. This is
+// additive to logos_core_get_modules_info(), whose loaded field continues to
+// describe only the legacy/default instance for compatibility.
+// The returned string must be freed by the caller.
+LOGOS_CORE_EXPORT char* logos_core_get_module_instances_info();
+
+// Return whether one exact module runtime is loaded. NULL or "" instance_id
+// selects the legacy/default runtime. Returns 1 when loaded, otherwise 0.
+LOGOS_CORE_EXPORT int logos_core_is_module_instance_loaded(const char* module_name,
+                                                           const char* instance_id);
 
 // Process a module file and add it to known modules
 // Returns the module name if successful, NULL if failed
@@ -118,6 +150,14 @@ LOGOS_CORE_EXPORT void logos_core_set_persistence_base_path(const char* path);
 // inherit the global default.
 LOGOS_CORE_EXPORT void logos_core_set_module_transports(const char* module_name,
                                                          const char* transport_set_json);
+
+// Address-aware transport counterpart. NULL or "" instance_id selects the
+// legacy/default runtime. Empty transport_set_json clears only this exact
+// runtime's override; it never affects sibling instances.
+LOGOS_CORE_EXPORT void logos_core_set_module_instance_transports(
+    const char* module_name,
+    const char* instance_id,
+    const char* transport_set_json);
 
 // Install the inter-module access policy: which callers may invoke which
 // targets. `policy_json` shape:

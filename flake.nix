@@ -6,22 +6,25 @@
     nixpkgs.follows = "logos-nix/nixpkgs";
     logos-cpp-sdk.url = "github:logos-co/logos-cpp-sdk";
     logos-cpp-sdk.inputs.logos-protocol.follows = "logos-protocol";
-    logos-protocol.url = "github:logos-co/logos-protocol";
-    logos-qt-sdk.url = "github:logos-co/logos-qt-sdk";
+    # Scoped runtime routing needs the forked protocol/Qt SDK pair until the
+    # additive instance APIs are available from their upstream defaults.
+    logos-protocol.url = "github:3esmit/logos-protocol";
+    logos-qt-sdk.url = "github:3esmit/logos-qt-sdk";
     logos-qt-sdk.inputs.logos-protocol.follows = "logos-protocol";
     logos-qt-sdk.inputs.logos-cpp-sdk.follows = "logos-cpp-sdk";
-    logos-capability-module.url = "github:logos-co/logos-capability-module";
+    # The forked capability module carries the merged scoped bootstrap API.
+    logos-capability-module.url = "github:3esmit/logos-capability-module";
     logos-module.url = "github:logos-co/logos-module";
     process-stats.url = "github:logos-co/process-stats";
-    logos-container.url = "github:logos-co/logos-container";
+    logos-container.url = "github:3esmit/logos-container";
     logos-module-loader.url = "github:logos-co/logos-module-loader";
     # The built-in default container + format-loader implementations. Named for
     # their ROLE rather than the backing repo, so `--override-input
     # default-container <other>` reads clearly. They point at the subprocess /
     # qt-plugin repos by default; swap the url (or override the input) to change
     # the default implementation.
-    default-container.url = "github:logos-co/logos-container-subprocess";
-    default-module-loader.url = "github:logos-co/logos-module-loader-qt";
+    default-container.url = "github:3esmit/logos-container-subprocess";
+    default-module-loader.url = "github:3esmit/logos-module-loader-qt";
     # The host transport (logos_host_qt) must be built against the SAME
     # logos-protocol as liblogos_core; otherwise the QtRO capability-token
     # handshake fails across the host<->plugin boundary. Pin it via follows so a

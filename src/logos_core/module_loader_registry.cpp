@@ -50,12 +50,40 @@ bool ModuleLoaderRegistry::terminate(const std::string& name)
     return false;
 }
 
+bool ModuleLoaderRegistry::terminateInstance(const ModuleAddress& address)
+{
+    if (!address.isValid()) return false;
+
+    std::lock_guard lock(m_mutex);
+    for (const auto& loader : m_loaders) {
+        auto instanceAware = std::dynamic_pointer_cast<InstanceAwareModuleLoader>(loader);
+        if (instanceAware && instanceAware->hasInstance(address)) {
+            return instanceAware->terminateInstance(address);
+        }
+    }
+    return false;
+}
+
 std::unordered_map<std::string, int64_t> ModuleLoaderRegistry::getAllPids() const
 {
     std::lock_guard lock(m_mutex);
     std::unordered_map<std::string, int64_t> result;
     for (const auto& loader : m_loaders) {
         auto pids = loader->getAllPids();
+        result.insert(pids.begin(), pids.end());
+    }
+    return result;
+}
+
+std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash>
+ModuleLoaderRegistry::getAllInstancePids() const
+{
+    std::lock_guard lock(m_mutex);
+    std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash> result;
+    for (const auto& loader : m_loaders) {
+        auto instanceAware = std::dynamic_pointer_cast<InstanceAwareModuleLoader>(loader);
+        if (!instanceAware) continue;
+        auto pids = instanceAware->getAllInstancePids();
         result.insert(pids.begin(), pids.end());
     }
     return result;

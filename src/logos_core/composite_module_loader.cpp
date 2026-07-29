@@ -60,4 +60,63 @@ std::unordered_map<std::string, int64_t> CompositeModuleLoader::getAllPids() con
     return container_->getAllPids();
 }
 
+InstanceAwareModuleContainer* CompositeModuleLoader::instanceContainer() const
+{
+    return dynamic_cast<InstanceAwareModuleContainer*>(container_.get());
+}
+
+bool CompositeModuleLoader::loadInstance(
+    const ModuleDescriptor& desc,
+    std::function<void(const ModuleAddress& address)> onTerminated,
+    LoadedModuleHandle& out)
+{
+    InstanceAwareModuleContainer* container = instanceContainer();
+    if (!container || !desc.address().isValid())
+        return false;
+
+    std::string host = loader_->resolveHostBinary(desc);
+    if (host.empty())
+        return false;
+
+    auto args = loader_->buildArguments(desc);
+    return container->launchInstance(desc, host, args, std::move(onTerminated), out);
+}
+
+bool CompositeModuleLoader::sendTokenToInstance(const ModuleAddress& address,
+                                                 const std::string& token)
+{
+    InstanceAwareModuleContainer* container = instanceContainer();
+    return container && address.isValid()
+        && container->sendTokenToInstance(address, token);
+}
+
+bool CompositeModuleLoader::terminateInstance(const ModuleAddress& address)
+{
+    InstanceAwareModuleContainer* container = instanceContainer();
+    return container && address.isValid() && container->terminateInstance(address);
+}
+
+bool CompositeModuleLoader::hasInstance(const ModuleAddress& address) const
+{
+    InstanceAwareModuleContainer* container = instanceContainer();
+    return container && address.isValid() && container->hasInstance(address);
+}
+
+std::optional<int64_t> CompositeModuleLoader::instancePid(
+    const ModuleAddress& address) const
+{
+    InstanceAwareModuleContainer* container = instanceContainer();
+    if (!container || !address.isValid())
+        return std::nullopt;
+    return container->instancePid(address);
+}
+
+std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash>
+CompositeModuleLoader::getAllInstancePids() const
+{
+    InstanceAwareModuleContainer* container = instanceContainer();
+    return container ? container->getAllInstancePids()
+                     : std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash>{};
+}
+
 } // namespace LogosCore

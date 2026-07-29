@@ -21,7 +21,7 @@ using namespace LogosCore;
 // std::make_shared / compressed_pair issues with internal-linkage types.
 // ---------------------------------------------------------------------------
 
-struct FakeContainer : public ModuleContainer {
+struct FakeContainer : public InstanceAwareModuleContainer {
     std::string id() const override { return "fake-container"; }
     bool canHandle(const ModuleDescriptor&) const override { return containerCanHandle; }
 
@@ -51,6 +51,7 @@ struct FakeContainer : public ModuleContainer {
     void terminateAll() override {
         terminateAllCount++;
         activeModules.clear();
+        activeInstances.clear();
     }
 
     bool hasModule(const std::string& name) const override {
@@ -68,8 +69,58 @@ struct FakeContainer : public ModuleContainer {
         return pids;
     }
 
+    bool launchInstance(const ModuleDescriptor& desc,
+                        const std::string& hostBinary,
+                        const std::vector<std::string>& args,
+                        std::function<void(const ModuleAddress&)> onTerminated,
+                        LoadedModuleHandle& out) override {
+        const ModuleAddress address = desc.address();
+        instanceLaunchCalls.push_back({address, hostBinary, args});
+        if (!address.isValid() || !instanceLaunchShouldSucceed) return false;
+        out.name = address.moduleName;
+        out.instanceId = address.instanceId;
+        out.pid = 43;
+        activeInstances.insert(address);
+        instanceCallbacks[address] = std::move(onTerminated);
+        return true;
+    }
+
+    bool sendTokenToInstance(const ModuleAddress& address,
+                             const std::string& token) override {
+        instanceTokenCalls.push_back({address, token});
+        return activeInstances.count(address) > 0 && instanceSendTokenResult;
+    }
+
+    bool terminateInstance(const ModuleAddress& address) override {
+        instanceTerminateCalls.push_back(address);
+        return activeInstances.erase(address) > 0;
+    }
+
+    bool hasInstance(const ModuleAddress& address) const override {
+        return activeInstances.count(address) > 0;
+    }
+
+    std::optional<int64_t> instancePid(const ModuleAddress& address) const override {
+        return activeInstances.count(address) > 0
+            ? std::optional<int64_t>{43}
+            : std::nullopt;
+    }
+
+    std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash>
+    getAllInstancePids() const override {
+        std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash> pids;
+        for (const auto& address : activeInstances) pids[address] = 43;
+        return pids;
+    }
+
     struct LaunchRecord {
         std::string name;
+        std::string hostBinary;
+        std::vector<std::string> args;
+    };
+
+    struct InstanceLaunchRecord {
+        ModuleAddress address;
         std::string hostBinary;
         std::vector<std::string> args;
     };
@@ -77,11 +128,19 @@ struct FakeContainer : public ModuleContainer {
     bool containerCanHandle = true;
     bool launchShouldSucceed = true;
     bool sendTokenResult = true;
+    bool instanceLaunchShouldSucceed = true;
+    bool instanceSendTokenResult = true;
     int terminateAllCount = 0;
     std::vector<LaunchRecord> launchCalls;
     std::vector<std::pair<std::string, std::string>> sendTokenCalls;
     std::vector<std::string> terminateCalls;
+    std::vector<InstanceLaunchRecord> instanceLaunchCalls;
+    std::vector<std::pair<ModuleAddress, std::string>> instanceTokenCalls;
+    std::vector<ModuleAddress> instanceTerminateCalls;
     std::unordered_set<std::string> activeModules;
+    std::unordered_set<ModuleAddress, ModuleAddressHash> activeInstances;
+    std::unordered_map<ModuleAddress, std::function<void(const ModuleAddress&)>,
+                       ModuleAddressHash> instanceCallbacks;
 };
 
 struct FakeLoader : public ModuleFormatLoader {
@@ -183,6 +242,41 @@ TEST_F(CompositeModuleLoaderTest, Load_FailsWhenContainerLaunchFails) {
     LoadedModuleHandle handle;
 
     EXPECT_FALSE(composite->load(desc, nullptr, handle));
+}
+
+TEST_F(CompositeModuleLoaderTest, LoadInstance_DelegatesFullAddressToInstanceAwareContainer) {
+    ModuleDescriptor desc;
+    desc.name = "lez_indexer_module";
+    desc.instanceId = "zone_alpha";
+    desc.path = "/lib/lez_indexer_module.so";
+    LoadedModuleHandle handle;
+
+    bool callbackCalled = false;
+    ASSERT_TRUE(composite->loadInstance(
+        desc,
+        [&callbackCalled](const ModuleAddress& address) {
+            callbackCalled = address == ModuleAddress{"lez_indexer_module", "zone_alpha"};
+        },
+        handle));
+
+    ASSERT_EQ(container->instanceLaunchCalls.size(), 1u);
+    EXPECT_EQ(container->instanceLaunchCalls[0].address, desc.address());
+    EXPECT_EQ(container->instanceLaunchCalls[0].hostBinary, "/usr/bin/fake_host");
+    EXPECT_EQ(handle.address(), desc.address());
+    EXPECT_TRUE(composite->hasInstance(desc.address()));
+    EXPECT_EQ(composite->instancePid(desc.address()), std::optional<int64_t>{43});
+
+    EXPECT_TRUE(composite->sendTokenToInstance(desc.address(), "scoped-token"));
+    ASSERT_EQ(container->instanceTokenCalls.size(), 1u);
+    EXPECT_EQ(container->instanceTokenCalls[0].first, desc.address());
+
+    const auto pids = composite->getAllInstancePids();
+    ASSERT_EQ(pids.size(), 1u);
+    EXPECT_EQ(pids.at(desc.address()), 43);
+
+    EXPECT_TRUE(composite->terminateInstance(desc.address()));
+    EXPECT_FALSE(composite->hasInstance(desc.address()));
+    EXPECT_FALSE(callbackCalled);  // Explicit teardown is container-owned.
 }
 
 // ---------------------------------------------------------------------------
