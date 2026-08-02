@@ -38,8 +38,9 @@ SPECS=(
 # published flake. The spec overrides logoscore's `logos-liblogos` input with
 # `github:logos-co/logos-liblogos{release}`, and the pin below makes {release}
 # expand to $COMMIT — so the runtime is built against exactly what's checked out
-# here. Override by exporting COMMIT (e.g. a tag), or set COMMIT="" to fall back
-# to latest master.
+# here. CI rewrites that base URL to the repository under test before applying
+# its pin. Override by exporting COMMIT (e.g. a tag), or set COMMIT="" to fall
+# back to latest master.
 #
 # Note: nix fetches the commit from the GitHub remote, so $COMMIT must be pushed
 # to logos-co/logos-liblogos. A local-only / uncommitted HEAD won't resolve;

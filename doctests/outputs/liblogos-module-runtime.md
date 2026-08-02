@@ -53,8 +53,9 @@ than the latest release. The result is symlinked to `./logos/`.
 
 > The override URL is what pins liblogos to a specific commit: the doc-test
 > runner expands a release placeholder on it to a concrete ref. Locally that
-> is this checkout's `HEAD` (see `run.sh`); in CI it is the commit being
-> tested. With no pin it falls back to latest `master`.
+> is this checkout's `HEAD` (see `run.sh`); in CI the workflow first selects
+> the repository under test, then pins its commit. With no pin it falls back
+> to that repository's latest default branch.
 
 ### 1.1 Build the CLI with the liblogos override
 

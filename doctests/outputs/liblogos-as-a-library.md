@@ -76,8 +76,9 @@ header, and the `logos_host` binary.
 
 > The URL carries a release placeholder that pins the build to a specific
 > commit: the doc-test runner expands it to a concrete ref. Locally that is
-> this checkout's `HEAD` (see `run.sh`); in CI it is the commit being
-> tested. With no pin it falls back to the latest `master`.
+> this checkout's `HEAD` (see `run.sh`); in CI the workflow first selects
+> the repository under test, then pins its commit. With no pin it falls back
+> to that repository's latest default branch.
 
 ### 1.1 Build the library
 
