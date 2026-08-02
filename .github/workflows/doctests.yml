@@ -1,7 +1,7 @@
 name: liblogos Doc-Tests
 
 # Runs the executable liblogos doc-tests end-to-end via the shared doctest CLI,
-# both pinned to the commit of logos-liblogos under test (via --release-for):
+# both sourced from, and pinned to, the revision of logos-liblogos under test:
 #   - doctests/liblogos-module-runtime.test.yaml — drives liblogos through the
 #     logoscore CLI frontend (build logoscore against this commit, install the
 #     accounts module, start the daemon, load + call methods).
@@ -62,43 +62,80 @@ jobs:
           name: logos-co
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      # Resolve the commit under test. For pull requests this is the PR's head
-      # commit (not the synthetic merge commit); for pushes it's the pushed
-      # commit. Passed to --release-for below so the doc-test builds logoscore
-      # against THIS commit of logos-liblogos instead of the latest release.
+      # Resolve the source and commit under test. For pull requests this is the
+      # PR's head commit (not the synthetic merge commit); for pushes it's the
+      # pushed commit. The prepared specs below use github.repository as their
+      # source base, then --release-for appends this commit to that URL.
       #
       # External fork PRs are the exception: their head commit may not be
-      # fetchable through logos-co/logos-liblogos. A branch in this repository
-      # remains safe to pin even when this repository is itself a fork, so
-      # distinguish external PRs by repository identity rather than `fork`.
+      # fetchable through the base repository. Keep that source but leave its
+      # ref empty, so the doc-test safely uses the base repository's latest
+      # default branch. A branch in this repository remains safe to pin even
+      # when this repository is itself a fork, so distinguish external PRs by
+      # repository identity rather than `fork`.
       - name: Resolve commit under test
         id: commit
         shell: bash
         run: |
+          source_base="github:${{ github.repository }}"
+          echo "source_base=$source_base" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "pull_request" ] && \
              [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
             echo "sha=" >> "$GITHUB_OUTPUT"
-            echo "External fork PR detected — doc-test will run against latest master."
+            echo "source=$source_base" >> "$GITHUB_OUTPUT"
+            echo "External fork PR detected — doc-test will run against latest base branch."
           else
             sha="${{ github.event.pull_request.head.sha || github.sha }}"
             test -n "$sha"
             echo "sha=$sha" >> "$GITHUB_OUTPUT"
-            echo "Doc-test will run against revision $sha."
+            echo "source=$source_base/$sha" >> "$GITHUB_OUTPUT"
+            echo "Doc-test will run against source $source_base/$sha."
           fi
 
-      - name: Verify same-repository PR revision
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Verify doctest source selection
         shell: bash
         run: |
-          test "${{ steps.commit.outputs.sha }}" = "${{ github.event.pull_request.head.sha }}"
+          source_base="github:${{ github.repository }}"
+          test "${{ steps.commit.outputs.source_base }}" = "$source_base"
+          if [ "${{ github.event_name }}" = "pull_request" ] && \
+             [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
+            sha="${{ github.event.pull_request.head.sha }}"
+            test "${{ steps.commit.outputs.sha }}" = "$sha"
+            test "${{ steps.commit.outputs.source }}" = "$source_base/$sha"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            test -z "${{ steps.commit.outputs.sha }}"
+            test "${{ steps.commit.outputs.source }}" = "$source_base"
+          else
+            sha="${{ github.sha }}"
+            test "${{ steps.commit.outputs.sha }}" = "$sha"
+            test "${{ steps.commit.outputs.source }}" = "$source_base/$sha"
+          fi
+
+      - name: Prepare doctest specs
+        id: specs
+        shell: bash
+        run: |
+          spec_dir="${{ runner.temp }}/liblogos-doctests"
+          source_base="${{ steps.commit.outputs.source_base }}"
+          mkdir -p "$spec_dir"
+          for spec in doctests/liblogos-module-runtime.test.yaml doctests/liblogos-as-a-library.test.yaml; do
+            rendered_spec="$spec_dir/$(basename "$spec")"
+            sed "s|github:logos-co/logos-liblogos|$source_base|g" "$spec" > "$rendered_spec"
+            grep -Fq "$source_base" "$rendered_spec"
+            if grep -Fq "github:logos-co/logos-liblogos" "$rendered_spec"; then
+              exit 1
+            fi
+          done
+          echo "dir=$spec_dir" >> "$GITHUB_OUTPUT"
+          echo "Prepared doctests with source base $source_base."
 
       # The runner is the shared `doctest` CLI, invoked directly via its flake
       # (github:logos-co/logos-doctest). The flake bundles Python + PyYAML
       # (+ rich), so no pip install step is needed.
       #
       # --release-for pins the {release} placeholder for logos-liblogos to the
-      # commit under test, so the override URL in each spec
-      # (`github:logos-co/logos-liblogos{release}`) becomes `.../<sha>` — the
+      # commit under test. The prepared specs use github.repository as their
+      # base, so the override URL becomes `github:<repository>/<sha>` — the
       # logoscore runtime and the embedded liblogos_core are both rebuilt against
       # this PR/push rather than master. Every other repo URL still resolves to
       # latest. Passing both specs to one `run` produces a single combined report
@@ -109,8 +146,8 @@ jobs:
           # report is complete. The job still fails (non-zero exit) if any step
           # failed; this only changes whether we stop early.
           nix run github:logos-co/logos-doctest -- run \
-            doctests/liblogos-module-runtime.test.yaml \
-            doctests/liblogos-as-a-library.test.yaml \
+            "${{ steps.specs.outputs.dir }}/liblogos-module-runtime.test.yaml" \
+            "${{ steps.specs.outputs.dir }}/liblogos-as-a-library.test.yaml" \
             --verbose \
             --continue-on-fail \
             --release-for logos-liblogos=${{ steps.commit.outputs.sha }} \
@@ -139,12 +176,12 @@ jobs:
       - name: Verify markdown generation
         run: |
           nix run github:logos-co/logos-doctest -- generate \
-            doctests/liblogos-module-runtime.test.yaml \
+            "${{ steps.specs.outputs.dir }}/liblogos-module-runtime.test.yaml" \
             --release-for logos-liblogos=${{ steps.commit.outputs.sha }} \
             -o /tmp/liblogos-module-runtime.md
           test -s /tmp/liblogos-module-runtime.md
           nix run github:logos-co/logos-doctest -- generate \
-            doctests/liblogos-as-a-library.test.yaml \
+            "${{ steps.specs.outputs.dir }}/liblogos-as-a-library.test.yaml" \
             --release-for logos-liblogos=${{ steps.commit.outputs.sha }} \
             -o /tmp/liblogos-as-a-library.md
           test -s /tmp/liblogos-as-a-library.md
