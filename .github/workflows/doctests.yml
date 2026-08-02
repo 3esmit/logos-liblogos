@@ -67,22 +67,30 @@ jobs:
       # commit. Passed to --release-for below so the doc-test builds logoscore
       # against THIS commit of logos-liblogos instead of the latest release.
       #
-      # Fork PRs are the exception: their head commit lives in the fork, not in
-      # logos-co/logos-liblogos, so nix could not fetch
-      # `github:logos-co/logos-liblogos/<sha>`. We blank the SHA for forks
-      # (--release-for repo= → pins that repo to latest), so the doc-test still
-      # runs for fork PRs, just against master.
+      # External fork PRs are the exception: their head commit may not be
+      # fetchable through logos-co/logos-liblogos. A branch in this repository
+      # remains safe to pin even when this repository is itself a fork, so
+      # distinguish external PRs by repository identity rather than `fork`.
       - name: Resolve commit under test
         id: commit
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ] && \
-             [ "${{ github.event.pull_request.head.repo.fork }}" = "true" ]; then
+             [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
             echo "sha=" >> "$GITHUB_OUTPUT"
-            echo "Fork PR detected — doc-test will run against latest master."
+            echo "External fork PR detected — doc-test will run against latest master."
           else
-            echo "sha=${{ github.event.pull_request.head.sha || github.sha }}" >> "$GITHUB_OUTPUT"
+            sha="${{ github.event.pull_request.head.sha || github.sha }}"
+            test -n "$sha"
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+            echo "Doc-test will run against revision $sha."
           fi
+
+      - name: Verify same-repository PR revision
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        shell: bash
+        run: |
+          test "${{ steps.commit.outputs.sha }}" = "${{ github.event.pull_request.head.sha }}"
 
       # The runner is the shared `doctest` CLI, invoked directly via its flake
       # (github:logos-co/logos-doctest). The flake bundles Python + PyYAML
