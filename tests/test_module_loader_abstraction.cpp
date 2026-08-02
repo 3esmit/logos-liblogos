@@ -25,9 +25,12 @@
 #include <unordered_set>
 #include <memory>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <nlohmann/json.hpp>
+#include <sys/wait.h>
+#include <unistd.h>
 
 using namespace LogosCore;
 
@@ -236,6 +239,35 @@ TEST_F(ModuleLoaderAbstractionTest, LoadModule_StoresLoaderInRegistry) {
 
     auto rt = ModuleManager::registry().loaderFor("foo");
     EXPECT_EQ(rt.get(), fake.get());
+}
+
+TEST_F(ModuleLoaderAbstractionTest,
+       DefaultCapabilityBootstrapWithInstanceIdentityDoesNotRequireSelfRpc) {
+    registerModule("capability_module");
+
+    const pid_t child = fork();
+    ASSERT_NE(child, -1);
+    if (child == 0) {
+        const std::string instanceId = "bootstrap_" + std::to_string(getpid());
+        setenv("LOGOS_INSTANCE_ID", instanceId.c_str(), 1);
+
+        // This is the startup step that logos_core_start() invokes after
+        // module discovery. A failed bootstrap must not leave the test process
+        // wedged. Before the regression fix, it synchronously dialed the
+        // capability provider before that provider was ready.
+        alarm(2);
+        const bool initialized = ModuleManager::initializeCapabilityModule();
+        alarm(0);
+
+        _exit(initialized && logos_core_is_module_loaded("capability_module")
+                  ? EXIT_SUCCESS
+                  : EXIT_FAILURE);
+    }
+
+    int status = 0;
+    ASSERT_EQ(waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), EXIT_SUCCESS);
 }
 
 TEST_F(ModuleLoaderAbstractionTest, UnloadModule_CallsFakeModuleLoaderTerminate) {

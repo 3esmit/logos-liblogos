@@ -440,7 +440,14 @@ namespace {
                   QString::fromStdString(address.instanceId)).toStdString();
         TokenManager::instance().saveToken(tokenKey, authToken);
 
-        notifyCapabilityModule(address, authToken);
+        // The default capability_module receives its bootstrap token directly
+        // from the container before its provider is published. Asking it to
+        // register that same token over IPC here turns core startup into a
+        // request for an object that is still coming up. Explicit capability
+        // runtimes still need their scoped token registered with the default
+        // capability service.
+        if (name != "capability_module" || !address.isDefaultInstance())
+            notifyCapabilityModule(address, authToken);
 
         refreshDerivedRestrictionsForDependenciesOf(name);
 
