@@ -25,6 +25,7 @@
 #include <unordered_set>
 #include <memory>
 #include <cstdint>
+#include <cerrno>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
@@ -265,7 +266,11 @@ TEST_F(ModuleLoaderAbstractionTest,
     }
 
     int status = 0;
-    ASSERT_EQ(waitpid(child, &status, 0), child);
+    pid_t waited = -1;
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited == -1 && errno == EINTR);
+    ASSERT_EQ(waited, child);
     ASSERT_TRUE(WIFEXITED(status));
     EXPECT_EQ(WEXITSTATUS(status), EXIT_SUCCESS);
 }
