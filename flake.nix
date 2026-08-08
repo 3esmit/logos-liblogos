@@ -25,7 +25,7 @@
     # the default implementation.
     default-container.url = "github:3esmit/logos-container-subprocess";
     # Track the maintained loader reconciliation until it lands on fork master.
-    default-module-loader.url = "github:3esmit/logos-module-loader-qt?rev=46ad0be4b254f322e99a3a5208e2022fbc4a0916";
+    default-module-loader.url = "github:3esmit/logos-module-loader-qt?rev=69e9b61f073310ed5fdb4e856ae71bff1682e4b6";
     # The host transport (logos_host_qt) must be built against the SAME
     # logos-protocol as liblogos_core; otherwise the QtRO capability-token
     # handshake fails across the host<->plugin boundary. Pin it via follows so a
