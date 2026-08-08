@@ -4,7 +4,7 @@
   inputs = {
     logos-nix.url = "github:logos-co/logos-nix";
     nixpkgs.follows = "logos-nix/nixpkgs";
-    logos-cpp-sdk.url = "github:logos-co/logos-cpp-sdk";
+    logos-cpp-sdk.url = "github:3esmit/logos-cpp-sdk";
     logos-cpp-sdk.inputs.logos-protocol.follows = "logos-protocol";
     # Scoped runtime routing needs the forked protocol/Qt SDK pair until the
     # additive instance APIs are available from their upstream defaults.
@@ -24,7 +24,8 @@
     # qt-plugin repos by default; swap the url (or override the input) to change
     # the default implementation.
     default-container.url = "github:3esmit/logos-container-subprocess";
-    default-module-loader.url = "github:3esmit/logos-module-loader-qt";
+    # Track the maintained loader reconciliation until it lands on fork master.
+    default-module-loader.url = "github:3esmit/logos-module-loader-qt?rev=46ad0be4b254f322e99a3a5208e2022fbc4a0916";
     # The host transport (logos_host_qt) must be built against the SAME
     # logos-protocol as liblogos_core; otherwise the QtRO capability-token
     # handshake fails across the host<->plugin boundary. Pin it via follows so a
