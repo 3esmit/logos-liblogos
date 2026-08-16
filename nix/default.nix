@@ -24,8 +24,12 @@
     pkgs.cmake
     pkgs.ninja
     pkgs.pkg-config
-    pkgs.qt6.wrapQtAppsNoGuiHook
-  ];
+  ]
+  # The Qt wrapper hooks are absent for a mingw host (they cannot even evaluate)
+  # and would skip a PE anyway. Each derivation that carries qtbase in
+  # buildInputs sets `dontWrapQtApps = true` to keep qtbase's setup hook from
+  # erroring in qtPreHook; BOTH halves are required.
+  ++ pkgs.lib.optional (!pkgs.stdenv.hostPlatform.isWindows) pkgs.qt6.wrapQtAppsNoGuiHook;
 
   # Common runtime dependencies. Boost, OpenSSL, and nlohmann_json
   # come in transitively via logosSdk's `propagatedBuildInputs`
@@ -56,8 +60,12 @@
     logosPackageManager
   ];
 
-  # Common CMake flags
-  cmakeFlags = [
+  # Common CMake flags. `logosQtCrossCmakeFlags` comes from logos-nix's Windows
+  # overlay and points CMake at the BUILD-platform Qt tool packages (repc, moc,
+  # qmltyperegistrar live in separate Qt6*Tools packages that must run on the
+  # builder). It is undefined — hence empty — for native package sets, so no
+  # isWindows guard is needed.
+  cmakeFlags = (pkgs.logosQtCrossCmakeFlags or [ ]) ++ [
     "-GNinja"
     "-DLOGOS_CPP_SDK_ROOT=${logosSdk}"
     "-DLOGOS_PROTOCOL_ROOT=${logosProtocolPkg}"
@@ -89,6 +97,6 @@
   # Metadata
   meta = with pkgs.lib; {
     description = "Logos liblogos core library";
-    platforms = platforms.unix;
+    platforms = platforms.unix ++ platforms.windows;
   };
 }

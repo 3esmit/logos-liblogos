@@ -185,6 +185,91 @@ add_library(logos_core SHARED ${LOGOS_CORE_SOURCES})
 # Set the LOGOS_CORE_LIBRARY definition for the library
 target_compile_definitions(logos_core PRIVATE LOGOS_CORE_LIBRARY)
 
+# PE export table: nothing to do here. LOGOS_CORE_EXPORT now expands to
+# __declspec(dllexport) on Windows (see logos_core/logos_core.h), which both
+# exports the C API and, because GNU ld disables auto-export image-wide once any
+# symbol is dllexported, stops the internal C++ surface leaking.
+#
+# This deliberately REPLACES an earlier `-Wl,--export-all-symbols`. That did
+# export the C API, but it also exported all 13,252 symbols in the image --
+# LogosAPI's among them -- so any consumer linking both liblogos_core and the
+# qt-sdk static library failed with "multiple definition of `LogosAPI::LogosAPI'".
+# Do not reinstate it; if the C API ever stops being exported, the cause is a
+# missing LOGOS_CORE_EXPORT on a declaration, not a missing linker flag.
+#
+# The C API is not the whole story, though. Narrowing the export table to it was
+# what made main_ui link again, but it also left every in-process image with its
+# own statically linked copy of the shared C++ runtime -- and therefore its own
+# TokenManager singleton, so a capability token saved by the host was invisible
+# to the UI plugin and every cross-module call was refused. ELF and Mach-O
+# interpose these symbols across the process and get one instance for free; PE
+# does not. The block below closes that gap the only way PE allows: liblogos_core
+# publishes the shared types EXPLICITLY, and the in-process consumers import them
+# instead of re-linking them. Neither horn of the old dilemma -- export
+# everything and collide, or export nothing and duplicate -- is taken.
+#
+# Full rationale, including why the consumer-side __declspec(dllimport) is the
+# load-bearing half rather than the export, lives in
+# logos-protocol/cpp/logos_shared_api.h.
+if(WIN32 AND TARGET logos-protocol::logos_protocol AND TARGET logos-qt-sdk::logos_qt_sdk)
+    # Ask the imported targets where their archives actually are rather than
+    # rebuilding the path by hand, so a rename or a layout change fails at
+    # generate time instead of producing an empty export list.
+    set(_logos_protocol_archive "$<TARGET_FILE:logos-protocol::logos_protocol>")
+    set(_logos_qt_sdk_archive   "$<TARGET_FILE:logos-qt-sdk::logos_qt_sdk>")
+
+    # --whole-archive, i.e. the whole of both libraries goes into the DLL even
+    # where liblogos itself never calls it.
+    #
+    # This is not gold-plating; it is what makes "single provider" true rather
+    # than approximate. The consumers link an EMPTY stand-in for these archives
+    # (logos-basecamp/cmake/LogosSharedFromDll.cmake) because ld would otherwise
+    # pull members for incidental reasons -- it was observed pulling
+    # logos_api.cpp.obj to satisfy std::string's move constructor -- and each
+    # pulled object collides with our export. Once the consumer has no archive to
+    # fall back on, anything the DLL failed to include becomes an undefined
+    # reference in a downstream repo. Linking normally would include only the
+    # objects liblogos happens to reference, which is a moving target.
+    target_link_options(logos_core PRIVATE
+        "-Wl,--whole-archive"
+        "${_logos_protocol_archive}"
+        "${_logos_qt_sdk_archive}"
+        "-Wl,--no-whole-archive")
+
+    # CMAKE_NM is normally set by the toolchain file; fall back to the
+    # cross-prefixed binary so a plain `cmake -DCMAKE_TOOLCHAIN_FILE=...` still
+    # generates. A missing nm must fail here, loudly, rather than silently
+    # emitting an empty .def and restoring the split-brain.
+    set(_logos_nm "${CMAKE_NM}")
+    if(NOT _logos_nm)
+        find_program(_logos_nm NAMES "${CMAKE_CXX_COMPILER_TARGET}-nm" x86_64-w64-mingw32-nm nm)
+    endif()
+    if(NOT _logos_nm)
+        message(FATAL_ERROR "nm not found; cannot generate the liblogos_core export definition")
+    endif()
+
+    set(_logos_shared_def "${CMAKE_CURRENT_BINARY_DIR}/logos_core_shared_exports.def")
+    add_custom_command(
+        OUTPUT "${_logos_shared_def}"
+        COMMAND ${CMAKE_COMMAND} -E env sh
+                "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/gen-shared-exports.sh"
+                "${_logos_nm}" "${_logos_shared_def}"
+                "${_logos_protocol_archive}" "*"
+                "${_logos_qt_sdk_archive}"   "*"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/gen-shared-exports.sh"
+                "${_logos_protocol_archive}" "${_logos_qt_sdk_archive}"
+        COMMENT "Generating liblogos_core shared-runtime export definition"
+        VERBATIM
+    )
+    add_custom_target(logos_core_shared_exports DEPENDS "${_logos_shared_def}")
+    add_dependencies(logos_core logos_core_shared_exports)
+
+    # A .def passed to the link ADDS to the export table; the ~18
+    # __declspec(dllexport) logos_core_* C API entries survive alongside it.
+    target_link_options(logos_core PRIVATE "${_logos_shared_def}")
+    set_property(TARGET logos_core APPEND PROPERTY LINK_DEPENDS "${_logos_shared_def}")
+endif()
+
 # Portable build: selects portable LGX variants instead of dev variants
 option(LOGOS_PORTABLE_BUILD "Build for portable variant selection" OFF)
 if(LOGOS_PORTABLE_BUILD)
@@ -213,6 +298,15 @@ if(DEFINED LOGOS_PACKAGE_MANAGER_ROOT AND EXISTS "${LOGOS_PACKAGE_MANAGER_ROOT}/
     IMPORTED_LOCATION "${LOGOS_PACKAGE_MANAGER_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${LOGOS_PACKAGE_MANAGER_ROOT}/include"
   )
+  # On Windows a SHARED IMPORTED target links through its IMPORT library, and
+  # CMake hard-errors at generate time when IMPORTED_IMPLIB is unset. find_library
+  # returns libpackage_manager_lib.dll.a there (CMAKE_FIND_LIBRARY_SUFFIXES for
+  # MinGW is .dll.a;.a), which is exactly the import library to link.
+  if(WIN32)
+    set_target_properties(package_manager_lib PROPERTIES
+      IMPORTED_IMPLIB "${LOGOS_PACKAGE_MANAGER_LIBRARY}"
+    )
+  endif()
 else()
   message(FATAL_ERROR "LOGOS_PACKAGE_MANAGER_ROOT not set or ${LOGOS_PACKAGE_MANAGER_ROOT}/lib does not exist")
 endif()
