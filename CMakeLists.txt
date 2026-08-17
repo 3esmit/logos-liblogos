@@ -34,35 +34,58 @@ endif()
 # Build src first to ensure logos_core is built before modules
 add_subdirectory(src)
 
-# GoogleTest setup
-# Try to find GoogleTest via find_package first (for Nix and system installations)
-find_package(GTest QUIET)
-
-if(NOT GTest_FOUND)
-    # Fall back to FetchContent if GoogleTest is not found
-    message(STATUS "GoogleTest not found via find_package, using FetchContent")
-    include(FetchContent)
-    FetchContent_Declare(googletest
-        URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
-    )
-    FetchContent_MakeAvailable(googletest)
-else()
-    message(STATUS "Using system GoogleTest")
+# Tests. Gated EXPLICITLY rather than left to find_package: the suite is
+# POSIX-only (tests/test_process_stats.cpp uses <spawn.h>, <sys/wait.h>,
+# posix_spawn/waitpid/kill and `environ`; tests/test_subprocess_manager.cpp
+# spawns /bin/sh), none of which mingw-w64 provides. The default build target
+# is `all`, so an ungated tests/ subdirectory would be compiled by every
+# cross build.
+#
+# The gate wraps the GTest lookup too: dropping only `add_subdirectory(tests)`
+# would still leave find_package(GTest) able to miss and fall through to the
+# FetchContent download, which dies in the nix sandbox with a misleading
+# "downloading ... failed".
+option(LOGOS_BUILD_TESTS "Build the logos_core test suite" ON)
+if(WIN32)
+    set(LOGOS_BUILD_TESTS OFF)
 endif()
 
-enable_testing()
-include(GoogleTest)
+if(LOGOS_BUILD_TESTS)
+    # Try to find GoogleTest via find_package first (for Nix and system installations)
+    find_package(GTest QUIET)
 
-# Add tests subdirectory
-add_subdirectory(tests)
+    if(NOT GTest_FOUND)
+        # Fall back to FetchContent if GoogleTest is not found
+        message(STATUS "GoogleTest not found via find_package, using FetchContent")
+        include(FetchContent)
+        FetchContent_Declare(googletest
+            URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+        )
+        FetchContent_MakeAvailable(googletest)
+    else()
+        message(STATUS "Using system GoogleTest")
+    endif()
+
+    enable_testing()
+    include(GoogleTest)
+
+    # Add tests subdirectory
+    add_subdirectory(tests)
+endif()
 
 # Install rules. The logos_host_qt binary (and its logos_host symlink) now live
 # in logos-module-loader-qt; liblogos installs only the core library here, and
 # bin.nix re-exports the host binary from that package so frontends are
 # unaffected.
+# RUNTIME DESTINATION matters on Windows: a DLL is a RUNTIME artifact, and with
+# only LIBRARY/ARCHIVE named CMake sends it to the DEFAULT runtime destination
+# (bin) while nix/lib.nix only ever copies ${build}/lib -- which would yield a
+# lib output holding the import library and no DLL, silently. Pointing RUNTIME
+# at lib keeps the output shape identical on all three platforms.
 install(TARGETS logos_core
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
+    RUNTIME DESTINATION lib
 )
 
 # Install headers

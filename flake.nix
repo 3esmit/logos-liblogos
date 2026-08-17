@@ -57,9 +57,45 @@
         logosPackageManager = logos-package-manager.packages.${system}.lib;
         logosPackageManagerPortable = logos-package-manager.packages.${system}.lib-portable;
       });
+
+      # Same as forAllSystems, plus the "x86_64-windows" pseudo-system. This
+      # cannot just be logos-nix.lib.forAllTargets, because that only supplies
+      # { system, pkgs } and this flake threads a dozen per-system dependencies
+      # through.
+      #
+      # Every dependency below is a TARGET-side artifact (headers, archives, or
+      # DLLs linked into logos_core, plus the host binary / plugin that are
+      # merely re-exported). liblogos runs NO code generator at build time
+      # (verified: no logos-cpp-generator / qt-generator anywhere in this repo),
+      # so nothing here needs to come from the build platform's package set.
+      #
+      # Applied to `packages` ONLY: `checks` would have to execute PE test
+      # binaries on the Linux builder, and a cross devShell offers no way to run
+      # what it produces.
+      windowsBuildSystem = "x86_64-linux";
+      forAllTargets = f:
+        nixpkgs.lib.genAttrs (systems ++ [ "x86_64-windows" ]) (system: f {
+          inherit system;
+          pkgs =
+            if system == "x86_64-windows"
+            then logos-nix.lib.mkWindowsPkgs { buildSystem = windowsBuildSystem; }
+            else import nixpkgs { inherit system; };
+          logosSdk = logos-cpp-sdk.packages.${system}.default;
+          logosProtocolPkg = logos-protocol.packages.${system}.default;
+          logosQtSdk = logos-qt-sdk.packages.${system}.default;
+          capabilityModule = logos-capability-module.packages.${system}.default;
+          logosModule = logos-module.packages.${system}.default;
+          processStats = process-stats.packages.${system}.default;
+          logosContainer = logos-container.packages.${system}.default;
+          logosModuleLoader = logos-module-loader.packages.${system}.default;
+          defaultContainer = default-container.packages.${system}.default;
+          defaultModuleLoader = default-module-loader.packages.${system}.default;
+          logosPackageManager = logos-package-manager.packages.${system}.lib;
+          logosPackageManagerPortable = logos-package-manager.packages.${system}.lib-portable;
+        });
     in
     {
-      packages = forAllSystems ({ pkgs, system, logosSdk, logosProtocolPkg, logosQtSdk, capabilityModule, logosModule, processStats, logosContainer, logosModuleLoader, defaultContainer, defaultModuleLoader, logosPackageManager, logosPackageManagerPortable }:
+      packages = forAllTargets ({ pkgs, system, logosSdk, logosProtocolPkg, logosQtSdk, capabilityModule, logosModule, processStats, logosContainer, logosModuleLoader, defaultContainer, defaultModuleLoader, logosPackageManager, logosPackageManagerPortable }:
         let
           # The built-in default container + format-loader implementations — the
           # single place the default is chosen. Each is just the package; it
@@ -117,7 +153,6 @@
           logos-liblogos-bin = bin;
           logos-liblogos-lib = lib;
           logos-liblogos-include = include;
-          logos-liblogos-tests = tests;
           logos-liblogos-modules = modules;
 
           # Combined output
@@ -128,6 +163,13 @@
 
           # Default package (dev)
           default = liblogos;
+        }
+        # The test suite is POSIX-only (posix_spawn/waitpid/kill, /bin/sh) and
+        # CMake gates it off for a Windows host, so `ninja logos_core_tests`
+        # would have no such target. Not exposing the output at all beats
+        # shipping one that cannot be built.
+        // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isWindows) {
+          logos-liblogos-tests = tests;
         }
       );
 

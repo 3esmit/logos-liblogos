@@ -1,8 +1,27 @@
 #ifndef LOGOS_CORE_H
 #define LOGOS_CORE_H
 
-// Define export macro for the library
-#if defined(LOGOS_CORE_LIBRARY)
+// Define export macro for the library.
+//
+// Windows needs __declspec, not visibility attributes: mingw-gcc accepts
+// __attribute__((visibility)) and silently ignores it on PE, so this header
+// used to export nothing at all and the build compensated with
+// -Wl,--export-all-symbols. That worked, but it exported the ENTIRE image --
+// 13,252 symbols, of which only 18 are this C API -- including every internal
+// C++ symbol such as LogosAPI's. Any consumer that links liblogos_core AND the
+// qt-sdk static library then gets the same definition twice and the link fails
+// with "multiple definition of `LogosAPI::LogosAPI'".
+//
+// Annotating the C API explicitly fixes that at the root, and does so twice
+// over: GNU ld disables PE auto-export image-wide as soon as ANY symbol is
+// dllexported, so the internal C++ surface stops leaking as a side effect.
+#if defined(_WIN32)
+#  if defined(LOGOS_CORE_LIBRARY)
+#    define LOGOS_CORE_EXPORT __declspec(dllexport)
+#  else
+#    define LOGOS_CORE_EXPORT __declspec(dllimport)
+#  endif
+#elif defined(LOGOS_CORE_LIBRARY)
 #  define LOGOS_CORE_EXPORT __attribute__((visibility("default")))
 #else
 #  define LOGOS_CORE_EXPORT

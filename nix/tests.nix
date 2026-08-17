@@ -1,6 +1,18 @@
 # Builds tests
 { pkgs, common, build }:
 
+# The suite is POSIX-only (posix_spawn/waitpid/kill, /bin/sh) and CMake turns
+# LOGOS_BUILD_TESTS off for a Windows host, so there would be no
+# `logos_core_tests` target to build. Refuse loudly instead: the configurePhase
+# below hand-rolls its `cmake` invocation and never expands $cmakeFlags, so a
+# Windows instantiation would silently drop -DCMAKE_SYSTEM_NAME=Windows and
+# every entry of logosQtCrossCmakeFlags -- i.e. configure as a NATIVE build and
+# link the wrong architecture, which is far worse than an error. flake.nix
+# already withholds this attribute on Windows; this makes that non-negotiable.
+if pkgs.stdenv.hostPlatform.isWindows then
+  throw "logos-liblogos: the logos_core test suite is POSIX-only and cannot be cross-compiled for ${pkgs.stdenv.hostPlatform.system}"
+else
+
 pkgs.stdenv.mkDerivation {
   pname = "${common.pname}-tests";
   version = common.version;
