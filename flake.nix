@@ -4,28 +4,28 @@
   inputs = {
     logos-nix.url = "github:logos-co/logos-nix";
     nixpkgs.follows = "logos-nix/nixpkgs";
-    logos-cpp-sdk.url = "github:3esmit/logos-cpp-sdk";
+    logos-cpp-sdk.url = "github:3esmit/logos-cpp-sdk?rev=790030b442f3fc210f973fb2b8807e3495ee9724";
     logos-cpp-sdk.inputs.logos-protocol.follows = "logos-protocol";
     # Scoped runtime routing needs the forked protocol/Qt SDK pair until the
     # additive instance APIs are available from their upstream defaults.
-    logos-protocol.url = "github:3esmit/logos-protocol";
-    logos-qt-sdk.url = "github:3esmit/logos-qt-sdk";
+    logos-protocol.url = "github:3esmit/logos-protocol?rev=dbd1df94caeb3e073c330fc3d95988ce1086b1a5";
+    logos-qt-sdk.url = "github:3esmit/logos-qt-sdk?rev=49cc49450de1db0168b687b52422beeefd55761c";
     logos-qt-sdk.inputs.logos-protocol.follows = "logos-protocol";
     logos-qt-sdk.inputs.logos-cpp-sdk.follows = "logos-cpp-sdk";
     # The forked capability module carries the merged scoped bootstrap API.
-    logos-capability-module.url = "github:3esmit/logos-capability-module";
+    logos-capability-module.url = "github:3esmit/logos-capability-module?rev=895bb4ebfe5b00b2cb85a2c2da181ecd3c26d543";
     logos-module.url = "github:logos-co/logos-module";
     process-stats.url = "github:logos-co/process-stats";
-    logos-container.url = "github:3esmit/logos-container";
+    logos-container.url = "github:3esmit/logos-container?rev=a8eb5dddce34541abaeb213efcd61657cb924b37";
     logos-module-loader.url = "github:logos-co/logos-module-loader";
     # The built-in default container + format-loader implementations. Named for
     # their ROLE rather than the backing repo, so `--override-input
     # default-container <other>` reads clearly. They point at the subprocess /
     # qt-plugin repos by default; swap the url (or override the input) to change
     # the default implementation.
-    default-container.url = "github:3esmit/logos-container-subprocess";
+    default-container.url = "github:3esmit/logos-container-subprocess?rev=06d6cda128d60a841d32799702c523687be83fba";
     # Track the maintained loader reconciliation until it lands on fork master.
-    default-module-loader.url = "github:3esmit/logos-module-loader-qt?rev=7e43e16eb6529c9e95b0fe88f615b31754cd6bda";
+    default-module-loader.url = "github:3esmit/logos-module-loader-qt?rev=cdde13ca10c9138a2d232fdab0f7bd3fa9d83a16";
     # The host transport (logos_host_qt) must be built against the SAME
     # logos-protocol as liblogos_core; otherwise the QtRO capability-token
     # handshake fails across the host<->plugin boundary. Pin it via follows so a
@@ -57,9 +57,45 @@
         logosPackageManager = logos-package-manager.packages.${system}.lib;
         logosPackageManagerPortable = logos-package-manager.packages.${system}.lib-portable;
       });
+
+      # Same as forAllSystems, plus the "x86_64-windows" pseudo-system. This
+      # cannot just be logos-nix.lib.forAllTargets, because that only supplies
+      # { system, pkgs } and this flake threads a dozen per-system dependencies
+      # through.
+      #
+      # Every dependency below is a TARGET-side artifact (headers, archives, or
+      # DLLs linked into logos_core, plus the host binary / plugin that are
+      # merely re-exported). liblogos runs NO code generator at build time
+      # (verified: no logos-cpp-generator / qt-generator anywhere in this repo),
+      # so nothing here needs to come from the build platform's package set.
+      #
+      # Applied to `packages` ONLY: `checks` would have to execute PE test
+      # binaries on the Linux builder, and a cross devShell offers no way to run
+      # what it produces.
+      windowsBuildSystem = "x86_64-linux";
+      forAllTargets = f:
+        nixpkgs.lib.genAttrs (systems ++ [ "x86_64-windows" ]) (system: f {
+          inherit system;
+          pkgs =
+            if system == "x86_64-windows"
+            then logos-nix.lib.mkWindowsPkgs { buildSystem = windowsBuildSystem; }
+            else import nixpkgs { inherit system; };
+          logosSdk = logos-cpp-sdk.packages.${system}.default;
+          logosProtocolPkg = logos-protocol.packages.${system}.default;
+          logosQtSdk = logos-qt-sdk.packages.${system}.default;
+          capabilityModule = logos-capability-module.packages.${system}.default;
+          logosModule = logos-module.packages.${system}.default;
+          processStats = process-stats.packages.${system}.default;
+          logosContainer = logos-container.packages.${system}.default;
+          logosModuleLoader = logos-module-loader.packages.${system}.default;
+          defaultContainer = default-container.packages.${system}.default;
+          defaultModuleLoader = default-module-loader.packages.${system}.default;
+          logosPackageManager = logos-package-manager.packages.${system}.lib;
+          logosPackageManagerPortable = logos-package-manager.packages.${system}.lib-portable;
+        });
     in
     {
-      packages = forAllSystems ({ pkgs, system, logosSdk, logosProtocolPkg, logosQtSdk, capabilityModule, logosModule, processStats, logosContainer, logosModuleLoader, defaultContainer, defaultModuleLoader, logosPackageManager, logosPackageManagerPortable }:
+      packages = forAllTargets ({ pkgs, system, logosSdk, logosProtocolPkg, logosQtSdk, capabilityModule, logosModule, processStats, logosContainer, logosModuleLoader, defaultContainer, defaultModuleLoader, logosPackageManager, logosPackageManagerPortable }:
         let
           # The built-in default container + format-loader implementations — the
           # single place the default is chosen. Each is just the package; it
@@ -117,7 +153,6 @@
           logos-liblogos-bin = bin;
           logos-liblogos-lib = lib;
           logos-liblogos-include = include;
-          logos-liblogos-tests = tests;
           logos-liblogos-modules = modules;
 
           # Combined output
@@ -128,6 +163,13 @@
 
           # Default package (dev)
           default = liblogos;
+        }
+        # The test suite is POSIX-only (posix_spawn/waitpid/kill, /bin/sh) and
+        # CMake gates it off for a Windows host, so `ninja logos_core_tests`
+        # would have no such target. Not exposing the output at all beats
+        # shipping one that cannot be built.
+        // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isWindows) {
+          logos-liblogos-tests = tests;
         }
       );
 
