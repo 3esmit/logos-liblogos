@@ -3,11 +3,11 @@ name: liblogos Doc-Tests
 # Runs the executable liblogos doc-tests end-to-end via the shared doctest CLI,
 # both sourced from, and pinned to, the revision of logos-liblogos under test:
 #   - doctests/liblogos-module-runtime.test.yaml — drives liblogos through the
-#     logoscore CLI frontend (build logoscore against this commit, install the
-#     accounts module, start the daemon, load + call methods).
+#     logoscore CLI frontend (build logoscore against this commit, install
+#     test_basic_module, start the daemon, load + call methods).
 #   - doctests/liblogos-as-a-library.test.yaml — embeds liblogos directly:
 #     builds liblogos_core from this commit, compiles a C++ program that links
-#     it, installs modules with lgpm, and loads the accounts module via the C API.
+#     it, installs modules with lgpm, and loads test_basic_module via the C API.
 # Both specs run in one invocation, producing a single combined report.
 #
 # ──────────────────────────────────────────────────────────────────────────────
@@ -146,8 +146,9 @@ jobs:
           # report is complete. The job still fails (non-zero exit) if any step
           # failed; this only changes whether we stop early.
           nix run github:logos-co/logos-doctest -- run \
-            "${{ steps.specs.outputs.dir }}/liblogos-module-runtime.test.yaml" \
-            "${{ steps.specs.outputs.dir }}/liblogos-as-a-library.test.yaml" \
+            doctests/liblogos-module-runtime.test.yaml \
+            doctests/liblogos-as-a-library.test.yaml \
+            doctests/liblogos-host-verdict.test.yaml \
             --verbose \
             --continue-on-fail \
             --release-for logos-liblogos=${{ steps.commit.outputs.sha }} \
@@ -185,11 +186,32 @@ jobs:
             --release-for logos-liblogos=${{ steps.commit.outputs.sha }} \
             -o /tmp/liblogos-as-a-library.md
           test -s /tmp/liblogos-as-a-library.md
+          nix run github:logos-co/logos-doctest -- generate \
+            doctests/liblogos-host-verdict.test.yaml \
+            --release-for logos-liblogos=${{ steps.commit.outputs.sha }} \
+            -o /tmp/liblogos-host-verdict.md
+          test -s /tmp/liblogos-host-verdict.md
           echo "Generated markdown successfully"
+
+  # The Windows leg of liblogos-host-verdict. Nix cannot run on Windows, so the
+  # shared harness cross-builds `logos-liblogos-bin` on ubuntu, stages it, and
+  # runs the generated script from that spec on a real windows-latest runner.
+  # Only the host-verdict spec has a Windows half: the other two drive liblogos
+  # through the logoscore CLI and through a compiled C++ program, and neither is
+  # reachable from a staged tree of THIS repo's targets alone.
+  windows:
+    name: liblogos host verdict (windows-latest)
+    uses: logos-co/logos-windows-ci/.github/workflows/windows-ci.yml@v1
+    with:
+      targets: logos-liblogos-bin
+      doctest-spec: doctests/liblogos-host-verdict.test.yaml
+      doctest-artifact: liblogos-doctest-report
 
   publish-report:
     name: Publish report to GitHub Pages
-    needs: doctests
+    # `always()` below is what makes the Windows leg's report publish even when
+    # it fails, which is when you most want to read it.
+    needs: [doctests, windows]
     # Run even when tests fail — a failing run is exactly when you want to open
     # the report. Skip on forks, where GITHUB_TOKEN can't push or comment.
     if: ${{ always() && github.event.pull_request.head.repo.fork != true }}
@@ -225,7 +247,7 @@ jobs:
 
           mkdir -p "site/$BASE"
           found=""
-          for os in ubuntu-latest macos-latest; do
+          for os in ubuntu-latest macos-latest windows-latest; do
             src="artifacts/liblogos-doctest-report-$os/index.html"
             if [ -f "$src" ]; then
               mkdir -p "site/$BASE/$os"
@@ -242,7 +264,7 @@ jobs:
             echo "<style>body{font:16px system-ui;margin:40px;max-width:640px}a{color:#2563eb}</style>"
             echo "<h1>liblogos doc-test reports</h1>"
             echo "<p><strong>$BASE</strong> · commit <code>${GITHUB_SHA::7}</code></p><ul>"
-            for os in ubuntu-latest macos-latest; do
+            for os in ubuntu-latest macos-latest windows-latest; do
               if [ -d "site/$BASE/$os" ]; then
                 echo "<li><a href=\"./$os/\">$os</a></li>"
               fi
@@ -275,7 +297,7 @@ jobs:
             const body =
               `${marker}\n` +
               `### 📊 liblogos doc-test report\n\n` +
-              `The real accounts module, run through a logoscore daemon built against ` +
+              `A real module, run through a logoscore daemon built against ` +
               `this commit of liblogos — rendered alongside the commands actually run ` +
               `and their output (updated each run, commit \`${context.sha.slice(0,7)}\`):\n\n` +
               `${links}\n\n` +

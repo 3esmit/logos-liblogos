@@ -1,0 +1,11 @@
+{
+  "name": "dep_range_fixture",
+  "display_name": "Dependency Range Fixture",
+  "version": "1.0.0",
+  "description": "Test fixture whose embedded metadata declares an object-form dependency carrying a version range",
+  "author": "Logos Core Team",
+  "type": "core",
+  "dependencies": [
+    { "name": "range_probe_dep", "version": "^9.0.0" }
+  ]
+}

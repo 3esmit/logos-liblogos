@@ -24,6 +24,8 @@ public:
               LoadedModuleHandle& out) override;
 
     bool sendToken(const std::string& name, const std::string& token) override;
+    LoadOutcome awaitLoad(const std::string& name,
+                          std::chrono::milliseconds timeout) override;
     void terminate(const std::string& name) override;
     void terminateAll() override;
     bool hasModule(const std::string& name) const override;

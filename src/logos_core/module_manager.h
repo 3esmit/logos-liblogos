@@ -1,6 +1,8 @@
 #ifndef MODULE_MANAGER_H
 #define MODULE_MANAGER_H
 
+#include "dependency_resolver.h"
+#include "dependency_gate.h"
 #include "module_loader_registry.h"
 #include <string>
 #include <vector>
@@ -19,6 +21,11 @@ namespace ModuleManager {
     // loaderConfig["id"]. They compose with the built-in subprocess default
     // (see module_manager.cpp). Also used by tests to install a FakeModuleLoader.
     LogosCore::ModuleLoaderRegistry& loaders();
+
+    // Build core's LogosAPI on THIS thread, fixing the owner every client it
+    // hands out marshals to. Called from logos_core_start() so the owner is the
+    // host's main thread rather than whichever thread dialled first.
+    void anchorCoreApi();
 
     void setModulesDir(const char* modules_dir);
     void addModulesDir(const char* modules_dir);
@@ -63,15 +70,18 @@ namespace ModuleManager {
     std::string processModule(const std::string& modulePath);
     char* processModuleCStr(const char* modulePath);
     bool loadModule(const char* moduleName);
-    bool loadModuleWithDependencies(const char* moduleName);
-
-    // Load an explicitly addressed runtime. The default instance remains the
-    // legacy idempotent path; an already-running explicit address is refused
-    // so callers cannot mistake a no-op for a newly created Zone runtime.
-    bool loadModuleInstance(const char* moduleName,
-                            const char* instanceId,
-                            bool withDependencies);
+    // `optionalLoad` decides whether optional dependencies that are INSTALLED
+    // are brought up alongside the target. Their failure never reaches the
+    // return value; see DependencyResolver::OptionalLoad.
+    bool loadModuleWithDependencies(const char* moduleName,
+                                    DependencyResolver::OptionalLoad optionalLoad =
+                                        DependencyResolver::OptionalLoad::OrderOnly);
     bool initializeCapabilityModule();
+
+    // Loads modules_state when installed, arming the lifecycle feed. Returns
+    // false and changes nothing when it is absent -- the module is optional and
+    // liblogos pays nothing for it not being there.
+    bool initializeModulesState();
     bool unloadModule(const char* moduleName);
 
     // Explicit-instance unload never cascades package dependents: dependency
@@ -99,7 +109,22 @@ namespace ModuleManager {
                                 const std::string& instanceId);
     std::unordered_map<std::string, int64_t> getModuleProcessIds();
 
+    // The dependency version-range gate exactly as loadModuleInternal applies
+    // it to `name`. A pure read of the registry — no plugin is touched.
+    LogosCore::DependencyGateResult dependencyGateFor(const std::string& name);
+
     std::vector<std::string> resolveDependencies(const std::vector<std::string>& requestedModules);
+
+    // The optional branches LOGOS_LOAD_REQUIRED_AND_OPTIONAL would decline for
+    // `moduleName`, as a JSON array. Empty array when it would decline none.
+    std::string optionalLoadReportJson(const std::string& moduleName);
+    char* optionalLoadReportCStr(const char* moduleName);
+
+    // Resolve with OptionalLoad::BestEffort, reporting BOTH the order and the
+    // subset whose load failure a caller must tolerate. One call rather than
+    // two because the two answers come from one walk and must agree.
+    DependencyResolver::ResolveResult resolveDependenciesBestEffort(
+        const std::vector<std::string>& requestedModules);
 
     // Returns the declared dependencies of `name` among known modules.
     // Names that appear only in module metadata and are not known to the
@@ -120,6 +145,11 @@ namespace ModuleManager {
     char** getDependenciesCStr(const char* name, bool recursive);
     char** getDependentsCStr(const char* name, bool recursive);
 
+    // The optional edge set. Direct only — an optional edge says nothing about
+    // what lies beyond it, so there is no transitive question to ask.
+    std::vector<std::string> getOptionalDependencies(const std::string& name);
+    char** getOptionalDependenciesCStr(const char* name);
+
     // JSON (string) describing every known module: name, path, loaded flag,
     // direct dependencies, direct dependents, and full embedded metadata.
     // See ModuleRegistry::allModulesInfo for the shape.
@@ -127,8 +157,13 @@ namespace ModuleManager {
     // char* variant. Caller owns the returned string. Never null.
     char* getModulesInfoCStr();
 
-    std::string getModuleInstancesInfoJson();
-    char* getModuleInstancesInfoCStr();
+    // The startup snapshot exactly as it goes over the wire to modules_state
+    // (a ModuleListing: {modules, partial, seq}), serialized. No RPC — exposed
+    // so tests can observe the record derivation without a live modules_state.
+    // NOT free of side effects: every record and the listing draw seqs from the
+    // observer's single counter, same as the real push (see the seq rule in
+    // module_manager.cpp), so calling it advances that counter.
+    std::string buildSnapshotListingJson();
 }
 
 #endif // MODULE_MANAGER_H

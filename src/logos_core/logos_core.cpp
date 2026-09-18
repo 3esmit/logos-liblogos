@@ -23,8 +23,13 @@ void logos_core_add_modules_dir(const char* modules_dir) {
 void logos_core_start() {
     logos::initLogging();
     LogosInstance::id();
+    // Before anything dials: this thread becomes the owner of every client.
+    ModuleManager::anchorCoreApi();
     ModuleManager::discoverInstalledModules();
     ModuleManager::initializeCapabilityModule();
+    // After capability_module: this one is optional, and its snapshot back-fills
+    // everything that happened before it was up.
+    ModuleManager::initializeModulesState();
 }
 
 void logos_core_cleanup() {
@@ -39,15 +44,34 @@ char** logos_core_get_known_modules() {
     return ModuleManager::getKnownModulesCStr();
 }
 
-int logos_core_load_module(const char* module_name, bool with_dependencies) {
+int logos_core_load_module(const char* module_name, LogosLoadDeps deps) {
     if (!module_name) { logos::logger("core").critical("logos_core_load_module: module_name must not be null"); std::abort(); }
     // "Already loaded ⇒ success" is implemented in
     // ModuleManager::loadModuleInternal (see the block at the top there
     // for the rationale and the dep-tree fast path). The header doc
     // documents this as part of the public contract — keep both in sync.
-    if (with_dependencies)
-        return ModuleManager::loadModuleWithDependencies(module_name) ? 1 : 0;
-    return ModuleManager::loadModule(module_name) ? 1 : 0;
+    switch (deps) {
+    case LOGOS_LOAD_REQUIRED_AND_OPTIONAL:
+        return ModuleManager::loadModuleWithDependencies(
+                   module_name, DependencyResolver::OptionalLoad::BestEffort) ? 1 : 0;
+    case LOGOS_LOAD_REQUIRED_DEPS:
+        return ModuleManager::loadModuleWithDependencies(
+                   module_name, DependencyResolver::OptionalLoad::OrderOnly) ? 1 : 0;
+    case LOGOS_LOAD_MODULE_ONLY:
+        return ModuleManager::loadModule(module_name) ? 1 : 0;
+    }
+    // An out-of-range enum is a caller bug, and loading the required tree is
+    // the answer that surprises least: it is what every caller of the old
+    // `with_dependencies=true` asked for.
+    logos::logger("core").warn("logos_core_load_module: unrecognised LogosLoadDeps {}; "
+                               "treating as LOGOS_LOAD_REQUIRED_DEPS", static_cast<int>(deps));
+    return ModuleManager::loadModuleWithDependencies(
+               module_name, DependencyResolver::OptionalLoad::OrderOnly) ? 1 : 0;
+}
+
+char* logos_core_optional_load_report(const char* module_name) {
+    if (!module_name) { logos::logger("core").critical("logos_core_optional_load_report: module_name must not be null"); std::abort(); }
+    return ModuleManager::optionalLoadReportCStr(module_name);
 }
 
 int logos_core_load_module_instance(const char* module_name,
@@ -82,6 +106,11 @@ int logos_core_unload_module_instance(const char* module_name,
 char** logos_core_get_module_dependencies(const char* module_name, bool recursive) {
     if (!module_name) { logos::logger("core").critical("logos_core_get_module_dependencies: module_name must not be null"); std::abort(); }
     return ModuleManager::getDependenciesCStr(module_name, recursive);
+}
+
+char** logos_core_get_module_optional_dependencies(const char* module_name) {
+    if (!module_name) { logos::logger("core").critical("logos_core_get_module_optional_dependencies: module_name must not be null"); std::abort(); }
+    return ModuleManager::getOptionalDependenciesCStr(module_name);
 }
 
 char** logos_core_get_module_dependents(const char* module_name, bool recursive) {

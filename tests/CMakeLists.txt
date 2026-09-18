@@ -19,6 +19,11 @@ add_executable(logos_core_tests
     test_module_loader_registry.cpp
     test_module_loader_abstraction.cpp
     test_protocol_gate.cpp
+    test_dependency_gate.cpp
+    test_module_state_observer.cpp
+    test_expected_exit_marks.cpp
+    test_load_verdict.cpp
+    test_load_concurrency.cpp
 )
 
 # Imported container/loader targets the tests drive via SubprocessManager /
@@ -59,7 +64,7 @@ if(DEFINED PROCESS_STATS_ROOT AND EXISTS "${PROCESS_STATS_ROOT}/include")
 endif()
 
 # Add SDK include directories (same layering as src/CMakeLists.txt:
-# Qt-free base headers + qt-sdk developer layer + protocol layer)
+# Qt-free base headers + qt-host runtime layer + protocol layer)
 if(EXISTS "${LOGOS_CPP_SDK_ROOT}/include")
   target_include_directories(logos_core_tests PRIVATE 
     ${LOGOS_CPP_SDK_ROOT}/include
@@ -68,18 +73,58 @@ if(EXISTS "${LOGOS_CPP_SDK_ROOT}/include")
 else()
   target_include_directories(logos_core_tests PRIVATE ${LOGOS_CPP_SDK_ROOT}/cpp)
 endif()
-if(DEFINED LOGOS_QT_SDK_ROOT AND EXISTS "${LOGOS_QT_SDK_ROOT}/include")
-  target_include_directories(logos_core_tests PRIVATE
-    ${LOGOS_QT_SDK_ROOT}/include
-    ${LOGOS_QT_SDK_ROOT}/include/cpp
-    ${LOGOS_QT_SDK_ROOT}/include/core
-  )
+# The Qt host runtime's headers (logos_api.h and friends). These come from
+# logos-qt-host, NOT logos-qt-sdk: src/CMakeLists.txt links logos_core against
+# logos-qt-host::logos_qt_host, and the tests link logos_core, so pointing this
+# at any other prefix would compile the tests against a DIFFERENT copy of
+# LogosAPI than the one they link -- the exact split-brain the Windows export
+# block in src/CMakeLists.txt exists to prevent.
+#
+# Not a silent `if(EXISTS ...)` skip. src/CMakeLists.txt already FATAL_ERRORs
+# when LOGOS_QT_HOST_ROOT is unusable and runs first (top-level CMakeLists adds
+# src/ before tests/), so reaching here with it unset means the layout changed
+# underneath us -- and a skip would hand that to the compiler as a confusing
+# "logos_api.h: No such file" instead of naming the cause.
+if(NOT DEFINED LOGOS_QT_HOST_ROOT OR NOT EXISTS "${LOGOS_QT_HOST_ROOT}/include")
+  message(FATAL_ERROR
+    "LOGOS_QT_HOST_ROOT does not point at a built logos-qt-host prefix "
+    "(got '${LOGOS_QT_HOST_ROOT}'), so logos_core_tests cannot be compiled "
+    "against the same Qt host runtime logos_core links.")
 endif()
+target_include_directories(logos_core_tests PRIVATE
+  ${LOGOS_QT_HOST_ROOT}/include
+  ${LOGOS_QT_HOST_ROOT}/include/cpp
+  ${LOGOS_QT_HOST_ROOT}/include/core
+)
 if(DEFINED LOGOS_PROTOCOL_ROOT AND EXISTS "${LOGOS_PROTOCOL_ROOT}/include")
   target_include_directories(logos_core_tests PRIVATE
     ${LOGOS_PROTOCOL_ROOT}/include
     ${LOGOS_PROTOCOL_ROOT}/include/cpp
   )
 endif()
+
+# Real Qt plugins that exist solely to carry object-form dependencies in their
+# EMBEDDED metadata: one with a version range, one whose constraint is not a
+# string. Nothing in the fleet declares either, so these are the only inputs
+# that exercise the production discovery -> gate path end to end;
+# RealDependencyRangeTest / RealMalformedConstraintTest consume them via
+# TEST_PLUGIN_DEP_RANGE and TEST_PLUGIN_DEP_MALFORMED.
+foreach(_fixture dep_range_fixture dep_malformed_fixture)
+    add_library(${_fixture}_plugin MODULE fixtures/${_fixture}_plugin.cpp)
+    set_target_properties(${_fixture}_plugin PROPERTIES
+        AUTOMOC ON
+        PREFIX ""
+    )
+    if(APPLE)
+        # CMake gives a MODULE library .so even on Darwin; match the .dylib the
+        # rest of the stack (and the check's pluginExt) names plugins by.
+        set_target_properties(${_fixture}_plugin PROPERTIES SUFFIX ".dylib")
+    endif()
+    target_link_libraries(${_fixture}_plugin PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+
+    # nix/tests.nix builds the `logos_core_tests` target only, so hanging the
+    # fixtures off it keeps the test binary and its inputs shipping together.
+    add_dependencies(logos_core_tests ${_fixture}_plugin)
+endforeach()
 
 gtest_discover_tests(logos_core_tests DISCOVERY_MODE PRE_TEST)

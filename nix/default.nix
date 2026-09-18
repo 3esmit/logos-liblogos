@@ -1,5 +1,7 @@
 # Common build configuration shared across all packages
-{ pkgs, logosSdk, logosProtocolPkg, logosQtSdk, logosModule, processStats
+{ pkgs, logosSdk, logosProtocolPkg, logosQtSdk
+, logosQtHost         # the Qt HOST RUNTIME (LogosAPI + provider glue) logos_core links
+, logosModule, processStats
 , logosContainer       # container contract (headers: ModuleContainer + makeContainer seam)
 , logosModuleLoader    # format-loader contract (headers: ModuleFormatLoader + makeFormatLoader seam)
 , logosPackageManager
@@ -48,6 +50,7 @@
     logosSdk
     logosProtocolPkg
     logosQtSdk
+    logosQtHost
     pkgs.zstd
     pkgs.gtest
     pkgs.spdlog
@@ -69,7 +72,12 @@
     "-GNinja"
     "-DLOGOS_CPP_SDK_ROOT=${logosSdk}"
     "-DLOGOS_PROTOCOL_ROOT=${logosProtocolPkg}"
-    "-DLOGOS_QT_SDK_ROOT=${logosQtSdk}"
+    # No -DLOGOS_QT_SDK_ROOT: nothing in this CMake build consumes logos-qt-sdk
+    # any more (the host runtime comes from logos-qt-host below). The package is
+    # still a buildInput + a nix/include.nix input, because this repo re-exports
+    # its developer headers -- but passing an unused -D would only earn a
+    # "Manually-specified variables were not used" warning.
+    "-DLOGOS_QT_HOST_ROOT=${logosQtHost}"
     "-DLOGOS_MODULE_ROOT=${logosModule}"
     "-DPROCESS_STATS_ROOT=${processStats}"
     "-DLOGOS_CONTAINER_ROOT=${logosContainer}"
@@ -87,6 +95,7 @@
     LOGOS_CPP_SDK_ROOT = "${logosSdk}";
     LOGOS_PROTOCOL_ROOT = "${logosProtocolPkg}";
     LOGOS_QT_SDK_ROOT = "${logosQtSdk}";
+    LOGOS_QT_HOST_ROOT = "${logosQtHost}";
     LOGOS_MODULE_ROOT = "${logosModule}";
     PROCESS_STATS_ROOT = "${processStats}";
     LOGOS_CONTAINER_ROOT = "${logosContainer}";

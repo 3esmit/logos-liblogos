@@ -35,6 +35,12 @@ bool CompositeModuleLoader::sendToken(const std::string& name, const std::string
     return container_->sendToken(name, token);
 }
 
+LoadOutcome CompositeModuleLoader::awaitLoad(const std::string& name,
+                                             std::chrono::milliseconds timeout)
+{
+    return container_->awaitLoad(name, timeout);
+}
+
 void CompositeModuleLoader::terminate(const std::string& name)
 {
     container_->terminate(name);

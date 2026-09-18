@@ -6,38 +6,37 @@
     nixpkgs.follows = "logos-nix/nixpkgs";
     logos-cpp-sdk.url = "github:3esmit/logos-cpp-sdk?rev=790030b442f3fc210f973fb2b8807e3495ee9724";
     logos-cpp-sdk.inputs.logos-protocol.follows = "logos-protocol";
-    # Scoped runtime routing needs the forked protocol/Qt SDK pair until the
-    # additive instance APIs are available from their upstream defaults.
-    logos-protocol.url = "github:3esmit/logos-protocol?rev=dbd1df94caeb3e073c330fc3d95988ce1086b1a5";
-    logos-qt-sdk.url = "github:3esmit/logos-qt-sdk?rev=49cc49450de1db0168b687b52422beeefd55761c";
+    logos-protocol.url = "github:logos-co/logos-protocol";
+    # ONE logos-protocol, and ONE logos-qt-host, in the closure. qt-host bakes
+    # sizeof(LogosAPIClient) into its own `operator new` while logos-protocol
+    # defines the constructor, so a second protocol here is an 8-byte heap
+    # overrun on every getClient(), not a version disagreement. Without these,
+    # an --override-input on our logos-protocol reaches only the direct edge and
+    # leaves qt-sdk's and plugin-qt's copies behind.
+    logos-qt-sdk.url = "github:logos-co/logos-qt-sdk";
     logos-qt-sdk.inputs.logos-protocol.follows = "logos-protocol";
-    logos-qt-sdk.inputs.logos-cpp-sdk.follows = "logos-cpp-sdk";
-    # The forked capability module carries the merged scoped bootstrap API.
-    logos-capability-module.url = "github:3esmit/logos-capability-module?rev=895bb4ebfe5b00b2cb85a2c2da181ecd3c26d543";
+    logos-qt-sdk.inputs.logos-plugin-qt.follows = "logos-plugin-qt";
+    logos-plugin-qt.url = "github:logos-co/logos-plugin-qt";
+    logos-plugin-qt.inputs.logos-protocol.follows = "logos-protocol";
+    logos-capability-module.url = "github:logos-co/logos-capability-module";
+    logos-modules-state-module.url = "github:logos-co/logos-modules-state-module";
     logos-module.url = "github:logos-co/logos-module";
     process-stats.url = "github:logos-co/process-stats";
     logos-container.url = "github:3esmit/logos-container?rev=a8eb5dddce34541abaeb213efcd61657cb924b37";
     logos-module-loader.url = "github:logos-co/logos-module-loader";
-    # The built-in default container + format-loader implementations. Named for
-    # their ROLE rather than the backing repo, so `--override-input
-    # default-container <other>` reads clearly. They point at the subprocess /
-    # qt-plugin repos by default; swap the url (or override the input) to change
-    # the default implementation.
-    default-container.url = "github:3esmit/logos-container-subprocess?rev=06d6cda128d60a841d32799702c523687be83fba";
-    # Track the maintained loader reconciliation until it lands on fork master.
-    default-module-loader.url = "github:3esmit/logos-module-loader-qt?rev=cdde13ca10c9138a2d232fdab0f7bd3fa9d83a16";
-    # The host transport (logos_host_qt) must be built against the SAME
-    # logos-protocol as liblogos_core; otherwise the QtRO capability-token
-    # handshake fails across the host<->plugin boundary. Pin it via follows so a
-    # protocol bump here rebuilds the bundled host instead of leaving it on a
-    # stale rev.
+    default-container.url = "github:logos-co/logos-container-subprocess";
+    # The default loader LINKS logos-protocol, and this process loads it, so a
+    # revision of its own means two of every function-local static in there.
+    # Only the protocol-carrying chain follows: the rest of its inputs are lock
+    # size, not correctness, and deep follows have broken this repo before.
+    default-module-loader.url = "github:logos-co/logos-module-loader-qt";
     default-module-loader.inputs.logos-protocol.follows = "logos-protocol";
     default-module-loader.inputs.logos-cpp-sdk.follows = "logos-cpp-sdk";
     default-module-loader.inputs.logos-qt-sdk.follows = "logos-qt-sdk";
     logos-package-manager.url = "github:logos-co/logos-package-manager";
   };
 
-  outputs = { self, nixpkgs, logos-nix, logos-cpp-sdk, logos-protocol, logos-qt-sdk, logos-capability-module, logos-module, logos-package-manager, process-stats, logos-container, default-container, logos-module-loader, default-module-loader }:
+  outputs = { self, nixpkgs, logos-nix, logos-cpp-sdk, logos-protocol, logos-qt-sdk, logos-plugin-qt, logos-capability-module, logos-modules-state-module, logos-module, logos-package-manager, process-stats, logos-container, default-container, logos-module-loader, default-module-loader }:
 
     let
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
@@ -47,7 +46,9 @@
         logosSdk = logos-cpp-sdk.packages.${system}.default;
         logosProtocolPkg = logos-protocol.packages.${system}.default;
         logosQtSdk = logos-qt-sdk.packages.${system}.default;
+        logosQtHost = logos-plugin-qt.packages.${system}.logos-qt-host;
         capabilityModule = logos-capability-module.packages.${system}.default;
+        modulesStateModule = logos-modules-state-module.packages.${system}.default;
         logosModule = logos-module.packages.${system}.default;
         processStats = process-stats.packages.${system}.default;
         logosContainer = logos-container.packages.${system}.default;
@@ -83,7 +84,9 @@
           logosSdk = logos-cpp-sdk.packages.${system}.default;
           logosProtocolPkg = logos-protocol.packages.${system}.default;
           logosQtSdk = logos-qt-sdk.packages.${system}.default;
+          logosQtHost = logos-plugin-qt.packages.${system}.logos-qt-host;
           capabilityModule = logos-capability-module.packages.${system}.default;
+          modulesStateModule = logos-modules-state-module.packages.${system}.default;
           logosModule = logos-module.packages.${system}.default;
           processStats = process-stats.packages.${system}.default;
           logosContainer = logos-container.packages.${system}.default;
@@ -95,7 +98,7 @@
         });
     in
     {
-      packages = forAllTargets ({ pkgs, system, logosSdk, logosProtocolPkg, logosQtSdk, capabilityModule, logosModule, processStats, logosContainer, logosModuleLoader, defaultContainer, defaultModuleLoader, logosPackageManager, logosPackageManagerPortable }:
+      packages = forAllTargets ({ pkgs, system, logosSdk, logosProtocolPkg, logosQtSdk, logosQtHost, capabilityModule, modulesStateModule, logosModule, processStats, logosContainer, logosModuleLoader, defaultContainer, defaultModuleLoader, logosPackageManager, logosPackageManagerPortable }:
         let
           # The built-in default container + format-loader implementations — the
           # single place the default is chosen. Each is just the package; it
@@ -107,11 +110,11 @@
 
           # Common configuration (dev, default)
           common = import ./nix/default.nix {
-            inherit pkgs logosSdk logosProtocolPkg logosQtSdk logosModule processStats logosContainer logosModuleLoader logosPackageManager containerImpl formatLoaderImpl;
+            inherit pkgs logosSdk logosProtocolPkg logosQtSdk logosQtHost logosModule processStats logosContainer logosModuleLoader logosPackageManager containerImpl formatLoaderImpl;
           };
           # Common configuration (portable)
           commonPortable = import ./nix/default.nix {
-            inherit pkgs logosSdk logosProtocolPkg logosQtSdk logosModule processStats logosContainer logosModuleLoader containerImpl formatLoaderImpl;
+            inherit pkgs logosSdk logosProtocolPkg logosQtSdk logosQtHost logosModule processStats logosContainer logosModuleLoader containerImpl formatLoaderImpl;
             logosPackageManager = logosPackageManagerPortable;
             portableBuild = true;
           };
@@ -125,27 +128,56 @@
 
           # Individual package components (reference the shared build)
           lib = import ./nix/lib.nix { inherit pkgs common build; };
-          modules = import ./nix/modules.nix { inherit pkgs common capabilityModule; };
-          modulesPortable = import ./nix/modules.nix { inherit pkgs capabilityModule; common = commonPortable; portableBuild = true; };
+          # The bundled set. capability_module is load-bearing at startup;
+          # modules_state is the lifecycle registry the observer feeds, and it
+          # is inert until something loads it -- the feed arms only when the
+          # module itself loads.
+          bundledModules = [
+            { name = "capability_module"; pkg = capabilityModule;   version = "1.0.0"; }
+            { name = "modules_state";     pkg = modulesStateModule; version = "0.1.0"; }
+          ];
+          modules = import ./nix/modules.nix { inherit pkgs common; modules = bundledModules; };
+          modulesPortable = import ./nix/modules.nix {
+            inherit pkgs;
+            modules = bundledModules;
+            common = commonPortable;
+            portableBuild = true;
+          };
           bin = import ./nix/bin.nix { inherit pkgs common build lib modules formatLoaderImpl; };
-          include = import ./nix/include.nix { inherit pkgs common src logosSdk; inherit logosProtocolPkg logosQtSdk; };
+          include = import ./nix/include.nix { inherit pkgs common src logosSdk; inherit logosProtocolPkg logosQtSdk logosQtHost; };
           tests = import ./nix/tests.nix { inherit pkgs common build; };
 
           # Portable package components
           libPortable = import ./nix/lib.nix { inherit pkgs; common = commonPortable; build = buildPortable; };
           binPortable = import ./nix/bin.nix { inherit pkgs formatLoaderImpl; common = commonPortable; build = buildPortable; lib = libPortable; modules = modulesPortable; };
-          includePortable = import ./nix/include.nix { inherit pkgs src logosSdk; inherit logosProtocolPkg logosQtSdk; common = commonPortable; };
+          includePortable = import ./nix/include.nix { inherit pkgs src logosSdk; inherit logosProtocolPkg logosQtSdk logosQtHost; common = commonPortable; };
 
           # Combined package (dev)
+          #
+          # propagatedBuildInputs is set HERE as well as on the headers output,
+          # and that is not redundant: symlinkJoin builds a NEW derivation and
+          # does not carry the propagation of the paths it joins. Consumers take
+          # this join, not the headers output, so setting it only there reaches
+          # nobody -- measured, logos-module-viewer still failed with
+          #     fatal error: nlohmann/json.hpp: No such file or directory
+          # until it was set on the join too.
+          #
+          # nlohmann is needed because this output re-exports the Qt host runtime
+          # headers, two of which (logos_provider_object.h, logos_qt_arg_decode.h)
+          # include <nlohmann/json.hpp>. Consumers going through
+          # find_package(logos-qt-host) get it transitively; consumers taking the
+          # include directory directly do not.
           liblogos = pkgs.symlinkJoin {
             name = "logos-liblogos";
             paths = [ bin lib include ];
+            propagatedBuildInputs = [ pkgs.nlohmann_json ];
           };
 
           # Combined package (portable)
           liblogosPortable = pkgs.symlinkJoin {
             name = "logos-liblogos-portable";
             paths = [ binPortable libPortable includePortable ];
+            propagatedBuildInputs = [ pkgs.nlohmann_json ];
           };
         in
         {
@@ -173,7 +205,7 @@
         }
       );
 
-      checks = forAllSystems ({ pkgs, system, ... }:
+      checks = forAllSystems ({ pkgs, system, defaultModuleLoader, ... }:
         let
           testsPkg = self.packages.${system}.logos-liblogos-tests;
           # Real Qt plugin used by RealPluginRegistryTest (TEST_PLUGIN env var).
@@ -182,16 +214,41 @@
           pluginExt = if pkgs.stdenv.isDarwin then "dylib" else "so";
         in {
           tests = pkgs.runCommand "logos-liblogos-tests" {
-            nativeBuildInputs = [ testsPkg ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
+            nativeBuildInputs = [ testsPkg ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              pkgs.qt6.qtbase
+              pkgs.util-linux   # setpriv, for the stand-in host that arms PR_SET_PDEATHSIG
+            ];
           } ''
             export QT_QPA_PLATFORM=offscreen
             ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
               export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
             ''}
             export TEST_PLUGIN="${capabilityModulePkg}/lib/capability_module_plugin.${pluginExt}"
+            # The only binaries in reach whose embedded metadata declares an
+            # object-form dependency -- one carrying a version range, one whose
+            # constraint is not a string (no shipped module declares either), so
+            # they are what cover the production discovery -> gate path.
+            # Staged into the tests package itself by tests/CMakeLists.txt.
+            export TEST_PLUGIN_DEP_RANGE="${testsPkg}/lib/dep_range_fixture_plugin.${pluginExt}"
+            export TEST_PLUGIN_DEP_MALFORMED="${testsPkg}/lib/dep_malformed_fixture_plugin.${pluginExt}"
+            # Turns a missing fixture into a red run instead of a skip. A skip
+            # renders as a pass, which would hand back the coverage hole.
+            # The real module host, for RealHostLoadVerdictTest: the load-verdict
+            # tests otherwise only prove the stand-in host is handled, and the
+            # defect they cover is about what the REAL child does.
+            export TEST_REAL_HOST="${defaultModuleLoader}/bin/logos_host_qt"
+            export LOGOS_REQUIRE_TEST_FIXTURES=1
+            for f in "$TEST_PLUGIN_DEP_RANGE" "$TEST_PLUGIN_DEP_MALFORMED" "$TEST_REAL_HOST"; do
+              if [ ! -f "$f" ]; then
+                echo "Error: constraint fixture not found at $f" >&2
+                exit 1
+              fi
+            done
             mkdir -p $out
             echo "Running logos-liblogos tests..."
             echo "TEST_PLUGIN=$TEST_PLUGIN"
+            echo "TEST_PLUGIN_DEP_RANGE=$TEST_PLUGIN_DEP_RANGE"
+            echo "TEST_PLUGIN_DEP_MALFORMED=$TEST_PLUGIN_DEP_MALFORMED"
             ${testsPkg}/bin/logos_core_tests --gtest_output=xml:$out/test-results.xml
           '';
         }

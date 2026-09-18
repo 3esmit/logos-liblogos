@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 #include "logos_core.h"
+#include "logos_core/dependency_gate.h"
+#include "logos_core/module_state_observer.h"
 #include "qt_test_adapter.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -265,7 +267,7 @@ TEST_F(ModuleManagerTest, GetKnownModulesCStr_ReturnsCorrectArray) {
 // =============================================================================
 
 TEST_F(ModuleManagerTest, LoadModule_ReturnsFalseForUnknownModule) {
-    int result = logos_core_load_module("nonexistent_module", false);
+    int result = logos_core_load_module("nonexistent_module", LOGOS_LOAD_MODULE_ONLY);
     EXPECT_EQ(result, 0);
 }
 
@@ -349,15 +351,15 @@ TEST_F(ModuleManagerTest, ResolveDependencies_HandlesTransitiveDeps) {
 }
 
 // =============================================================================
-// C API: logos_core_load_module with_dependencies=true Tests
+// C API: logos_core_load_module LOGOS_LOAD_REQUIRED_DEPS Tests
 // =============================================================================
 
 TEST_F(ModuleManagerTest, LoadModuleWithDeps_AbortsForNull) {
-    EXPECT_DEATH(logos_core_load_module(nullptr, true), "");
+    EXPECT_DEATH(logos_core_load_module(nullptr, LOGOS_LOAD_REQUIRED_DEPS), "");
 }
 
 TEST_F(ModuleManagerTest, LoadModuleWithDeps_ReturnsZeroForUnknown) {
-    int result = logos_core_load_module("unknown_module", true);
+    int result = logos_core_load_module("unknown_module", LOGOS_LOAD_REQUIRED_DEPS);
     EXPECT_EQ(result, 0);
 }
 
@@ -384,11 +386,11 @@ TEST_F(ModuleManagerTest, LoadModule_ReturnsTrueWhenAlreadyLoaded) {
     ASSERT_EQ(logos_core_is_module_loaded("preloaded"), 1);
 
     // First call: module is already loaded ⇒ no-op success.
-    EXPECT_EQ(logos_core_load_module("preloaded", false), 1)
+    EXPECT_EQ(logos_core_load_module("preloaded", LOGOS_LOAD_MODULE_ONLY), 1)
         << "loading an already-loaded module must return 1 (no-op success)";
 
     // Repeating the call must stay idempotent — still success, still loaded.
-    EXPECT_EQ(logos_core_load_module("preloaded", false), 1);
+    EXPECT_EQ(logos_core_load_module("preloaded", LOGOS_LOAD_MODULE_ONLY), 1);
     EXPECT_EQ(logos_core_is_module_loaded("preloaded"), 1);
 }
 
@@ -401,18 +403,72 @@ TEST_F(ModuleManagerTest, LoadModuleWithDeps_ReturnsTrueWhenAllAlreadyLoaded) {
     logos_core_mark_module_loaded("child");
     logos_core_mark_module_loaded("parent");
 
-    // with_dependencies=true walks the resolved order and calls
+    // LOGOS_LOAD_REQUIRED_DEPS walks the resolved order and calls
     // loadModuleInternal for each; every step short-circuits on
     // isLoaded() and returns true, so the overall call returns 1.
-    EXPECT_EQ(logos_core_load_module("parent", true), 1)
-        << "with_dependencies=true must return 1 when the target and "
+    EXPECT_EQ(logos_core_load_module("parent", LOGOS_LOAD_REQUIRED_DEPS), 1)
+        << "LOGOS_LOAD_REQUIRED_DEPS must return 1 when the target and "
            "all of its deps were already loaded before the call";
     EXPECT_EQ(logos_core_is_module_loaded("parent"), 1);
     EXPECT_EQ(logos_core_is_module_loaded("child"),  1);
 }
 
+// LOGOS_LOAD_REQUIRED_AND_OPTIONAL: the whole point is that a failure here is
+// not a failure of the call. These two run together — the second is what makes
+// the first mean anything, since a test that tolerates everything tolerates
+// nothing in particular.
+TEST_F(ModuleManagerTest, BestEffort_AFailingOptionalDependencyDoesNotFailTheLoad) {
+    logos_core_register_module("app", "/fake/app");
+    logos_core_register_module("extra", "/fake/extra");
+    const char* optApp[] = {"extra"};
+    logos_core_register_module_optional_dependencies("app", optApp, 1);
+    // `app` itself is already up, so the only load attempted is `extra`'s —
+    // and there is no plugin at /fake/extra, so it fails.
+    logos_core_mark_module_loaded("app");
+
+    EXPECT_EQ(logos_core_load_module("app", LOGOS_LOAD_REQUIRED_AND_OPTIONAL), 1)
+        << "an INSTALLED optional dependency that fails to load must not fail "
+           "the load of the module that merely names it";
+    EXPECT_EQ(logos_core_is_module_loaded("app"), 1);
+    EXPECT_EQ(logos_core_is_module_loaded("extra"), 0)
+        << "it really did fail — otherwise this test proves nothing";
+}
+
+TEST_F(ModuleManagerTest, BestEffort_AnOptionalDepWhoseOwnRequiredDepIsMissingIsNotFatal) {
+    // app -opt-> extra -req-> ghost(not installed).
+    // `extra` is unloadable, but `app` only NAMED it as optional. Nothing here
+    // may fail app's load — the resolver reports `ghost` as missing, and
+    // missing is what loadModuleWithDependencies treats as a hard failure.
+    logos_core_register_module("app", "/fake/app");
+    logos_core_register_module("extra", "/fake/extra");
+    const char* optApp[] = {"extra"};
+    logos_core_register_module_optional_dependencies("app", optApp, 1);
+    const char* depsExtra[] = {"ghost"};
+    logos_core_register_module_dependencies("extra", depsExtra, 1);
+    logos_core_mark_module_loaded("app");
+
+    EXPECT_EQ(logos_core_load_module("app", LOGOS_LOAD_REQUIRED_AND_OPTIONAL), 1)
+        << "an optional dependency that cannot be satisfied must be left out, "
+           "not turned into a resolution failure for the module naming it";
+    EXPECT_EQ(logos_core_is_module_loaded("app"), 1);
+}
+
+TEST_F(ModuleManagerTest, BestEffort_TheSameFailureIsStillFatalForARequiredDependency) {
+    logos_core_register_module("app", "/fake/app");
+    logos_core_register_module("extra", "/fake/extra");
+    const char* deps[] = {"extra"};
+    logos_core_register_module_dependencies("app", deps, 1);
+    logos_core_mark_module_loaded("app");
+
+    // Identical fixture, one word changed: `extra` is REQUIRED. The tolerance
+    // above is specific to the optional kind, not a test that cannot fail.
+    EXPECT_EQ(logos_core_load_module("app", LOGOS_LOAD_REQUIRED_AND_OPTIONAL), 0)
+        << "a REQUIRED dependency failing must still fail the load, even when "
+           "best-effort optional loading is asked for";
+}
+
 // =============================================================================
-// Dependency resolution failure: logos_core_load_module(name, true) must
+// Dependency resolution failure: logos_core_load_module(name, LOGOS_LOAD_REQUIRED_DEPS) must
 // return 0 when the dependency graph cannot be fully resolved.
 //
 // The resolver silently drops unknown modules and detects cycles. Before
@@ -429,7 +485,7 @@ TEST_F(ModuleManagerTest, LoadModuleWithDeps_FailsWhenDirectDependencyUnknown) {
     logos_core_register_module_dependencies("parent", deps, 1);
 
     // "unknown_dep" is not registered → resolution has missing deps → fail.
-    EXPECT_EQ(logos_core_load_module("parent", true), 0)
+    EXPECT_EQ(logos_core_load_module("parent", LOGOS_LOAD_REQUIRED_DEPS), 0)
         << "must return 0 when a direct dependency is unknown";
 }
 
@@ -442,7 +498,7 @@ TEST_F(ModuleManagerTest, LoadModuleWithDeps_FailsWhenTransitiveDependencyUnknow
     logos_core_register_module_dependencies("mid", depsMid, 1);
 
     // "bottom_unknown" not registered → transitive resolution fails.
-    EXPECT_EQ(logos_core_load_module("top", true), 0)
+    EXPECT_EQ(logos_core_load_module("top", LOGOS_LOAD_REQUIRED_DEPS), 0)
         << "must return 0 when a transitive dependency is unknown";
 }
 
@@ -455,7 +511,7 @@ TEST_F(ModuleManagerTest, LoadModuleWithDeps_FailsOnCircularDependency) {
     logos_core_register_module_dependencies("cyc_b", depsB, 1);
 
     // Cycle detected → must return 0.
-    EXPECT_EQ(logos_core_load_module("cyc_a", true), 0)
+    EXPECT_EQ(logos_core_load_module("cyc_a", LOGOS_LOAD_REQUIRED_DEPS), 0)
         << "must return 0 when a circular dependency is detected";
 }
 
@@ -651,6 +707,130 @@ TEST_F(ModuleManagerTest, RegisterDependencies_PreservesLoadedFlag) {
 }
 
 // =============================================================================
+// Dependency version-range gate
+//
+// A module declares each dependency either as a bare name or as
+// { name, version, signer }. The declared range is checked against the
+// installed dependency's version before the loader is ever consulted; an
+// unsatisfied or unevaluatable range refuses the load exactly the way the
+// protocol gate refuses an incompatible major.
+//
+// The refusal cases run through the real logos_core_load_module and are read
+// back off the lifecycle observer, which is where a refusal is reported. The
+// permissive cases are asserted on the gate itself, because a load that gets
+// PAST the gate goes on to spawn a module host — not something these tests
+// can (or should) drive with a placeholder file on disk.
+// =============================================================================
+
+class DependencyGateLoadTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        clearModuleState();
+        auto& o = logos::ModuleStateObserver::instance();
+        o.setSink({});
+        o.clearPending();
+        seen.clear();
+        o.setSink([this](const std::vector<logos::ModuleTransition>& batch) {
+            for (const auto& t : batch) seen.push_back(t);
+        });
+    }
+
+    void TearDown() override {
+        auto& o = logos::ModuleStateObserver::instance();
+        o.setSink({});
+        o.clearPending();
+        clearModuleState();
+    }
+
+    // `app` depends on `lib`, which is installed at `installedVersion`.
+    void plantGraph(const std::string& range, const std::string& installedVersion) {
+        logos_core_register_module("lib", "/path/to/lib");
+        ModuleManager::registry().registerModuleVersion("lib", installedVersion);
+        logos_core_register_module("app", (tmpDir.path / "app_plugin.so").string().c_str());
+        ModuleManager::registry().registerDependencies(
+            "app", std::vector<LogosCore::ModuleDependency>{{"lib", range, ""}});
+        std::ofstream f(tmpDir.path / "app_plugin.so");
+        f << "not a real plugin";
+    }
+
+    // The reason recorded on the loading -> error edge for `module`, or "".
+    std::string errorReason(const std::string& module) const {
+        for (const auto& t : seen) {
+            if (t.module == module && t.newState == logos::module_state::kError)
+                return t.reason.value_or(std::string{});
+        }
+        return {};
+    }
+
+    TmpDir tmpDir;
+    std::vector<logos::ModuleTransition> seen;
+};
+
+TEST_F(DependencyGateLoadTest, UnsatisfiedRange_RefusesLoad) {
+    plantGraph("^2.0.0", "1.0.0");
+
+    EXPECT_EQ(logos_core_load_module("app", LOGOS_LOAD_MODULE_ONLY), 0);
+    EXPECT_EQ(logos_core_is_module_loaded("app"), 0);
+
+    const std::string reason = errorReason("app");
+    EXPECT_NE(reason.find("lib"), std::string::npos) << reason;
+    EXPECT_NE(reason.find("^2.0.0"), std::string::npos) << reason;
+    EXPECT_NE(reason.find("1.0.0"), std::string::npos) << reason;
+}
+
+TEST_F(DependencyGateLoadTest, MalformedRange_RefusesLoad) {
+    plantGraph("^^2.0.0", "2.1.0");
+
+    EXPECT_EQ(logos_core_load_module("app", LOGOS_LOAD_MODULE_ONLY), 0);
+
+    const std::string reason = errorReason("app");
+    EXPECT_NE(reason.find("unparseable"), std::string::npos) << reason;
+}
+
+TEST_F(DependencyGateLoadTest, SatisfiedRange_GateAllows) {
+    plantGraph("^2.0.0", "2.1.0");
+
+    const auto gate = ModuleManager::dependencyGateFor("app");
+    EXPECT_EQ(gate.decision, LogosCore::DependencyGateDecision::Allow);
+    EXPECT_TRUE(gate.reason.empty());
+}
+
+// The string form of a dependency entry keeps behaving exactly as before: an
+// edge, no constraint, nothing for the gate to refuse.
+TEST_F(DependencyGateLoadTest, BareNameDependency_GateIsUnconstrained) {
+    logos_core_register_module("lib", "/path/to/lib");
+    logos_core_register_module("app", "/path/to/app");
+    const char* deps[] = {"lib"};
+    logos_core_register_module_dependencies("app", deps, 1);
+
+    const auto gate = ModuleManager::dependencyGateFor("app");
+    EXPECT_EQ(gate.decision, LogosCore::DependencyGateDecision::Unconstrained);
+    EXPECT_EQ(logos_core_get_module_dependencies_count("app"), 1);
+}
+
+// Carrying constraints must not widen the name-only shapes the graph and the
+// modules-info wire format are built on.
+TEST_F(DependencyGateLoadTest, ConstraintsDoNotChangeTheNameOnlyViews) {
+    plantGraph("^2.0.0", "2.1.0");
+
+    EXPECT_EQ(ModuleManager::registry().moduleDependencies("app"),
+              (std::vector<std::string>{"lib"}));
+    EXPECT_EQ(ModuleManager::registry().moduleDependents("lib"),
+              (std::vector<std::string>{"app"}));
+
+    char* json = logos_core_get_modules_info();
+    ASSERT_NE(json, nullptr);
+    nlohmann::json info = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
+    free(json);
+    ASSERT_TRUE(info.is_array());
+    for (const auto& entry : info) {
+        if (entry.value("name", std::string{}) != "app") continue;
+        ASSERT_TRUE(entry["dependencies"].is_array());
+        EXPECT_EQ(entry["dependencies"], nlohmann::json::array({"lib"}));
+    }
+}
+
+// =============================================================================
 // End-to-end regression tests using a real Qt module.
 // =============================================================================
 
@@ -711,6 +891,323 @@ TEST_F(RealModuleRegistryTest, GetModulesInfo_PopulatesEmbeddedMetadata) {
     EXPECT_EQ(entry["metadata"].value("name", std::string{}), moduleName);
     EXPECT_FALSE(entry["metadata"].value("version", std::string{}).empty())
         << "built test modules declare a version in metadata.json";
+}
+
+// The version a dependent's range is evaluated against is the dependency's own
+// embedded stamp, cached at discovery without loading the plugin. Closes the
+// loop from a real binary's metadata to a gate decision.
+TEST_F(RealModuleRegistryTest, EmbeddedVersionFeedsTheDependencyGate) {
+    char* name = logos_core_process_module(modulePath.c_str());
+    ASSERT_NE(name, nullptr) << "process_module failed for " << modulePath;
+    const std::string dep(name);
+    delete[] name;
+
+    const std::string version = ModuleManager::registry().moduleVersion(dep);
+    ASSERT_FALSE(version.empty()) << "built test modules declare a version";
+
+    logos_core_register_module("dependent", "/path/to/dependent");
+    ModuleManager::registry().registerDependencies(
+        "dependent", std::vector<LogosCore::ModuleDependency>{{dep, "=" + version, ""}});
+    EXPECT_EQ(ModuleManager::dependencyGateFor("dependent").decision,
+              LogosCore::DependencyGateDecision::Allow);
+
+    ModuleManager::registry().registerDependencies(
+        "dependent", std::vector<LogosCore::ModuleDependency>{{dep, "=" + version + "-nope.1", ""}});
+    EXPECT_EQ(ModuleManager::dependencyGateFor("dependent").decision,
+              LogosCore::DependencyGateDecision::Refuse);
+}
+
+// =============================================================================
+// The production dependency-range path, end to end from a real binary.
+//
+// This is the ONLY coverage of it. Every other constraint test injects entries
+// through the constraint-carrying registerDependencies overload, which has no
+// production caller. The real path is
+//     processModuleInternal -> ModuleLib::extractMetadata
+//                           -> toGateDependencies -> ModuleInfo::dependencies
+//                           -> dependencyGateFor
+// and it was measurably untested: dropping the constraints where the registry
+// assigns them (keeping only the names) left all 218 tests green, i.e. it
+// silently reinstated the bug the gate exists to fix.
+//
+// It stayed uncovered because no metadata.json in the fleet uses the object
+// form, so no shipped module declares a range. tests/fixtures supplies the
+// missing input: a real Qt plugin whose embedded blob declares
+//     "dependencies": [ { "name": "range_probe_dep", "version": "^9.0.0" } ]
+// =============================================================================
+
+namespace {
+// Mirrors tests/fixtures/dep_range_fixture.json. A drift here shows up as an
+// assertion, not as a test that quietly stops covering anything.
+constexpr const char* kFixtureModule = "dep_range_fixture";
+constexpr const char* kFixtureDep    = "range_probe_dep";
+constexpr const char* kFixtureRange  = "^9.0.0";
+}  // namespace
+
+class RealDependencyRangeTest : public ::testing::Test {
+protected:
+    std::string fixturePath;
+
+    void SetUp() override {
+        clearModuleState();
+
+        const char* env = std::getenv("TEST_PLUGIN_DEP_RANGE");
+        if (env && std::strlen(env) > 0 && fs::exists(env)) {
+            fixturePath = env;
+            return;
+        }
+
+        // A skipped test renders as a pass, and a pass here would mean the
+        // production path is unguarded again. CI sets LOGOS_REQUIRE_TEST_FIXTURES
+        // so an absent fixture is a red run; a local dev without one still skips.
+        const char* strict = std::getenv("LOGOS_REQUIRE_TEST_FIXTURES");
+        if (strict && std::strcmp(strict, "0") != 0) {
+            FAIL() << "TEST_PLUGIN_DEP_RANGE is unset or missing (got '"
+                   << (env ? env : "") << "') while LOGOS_REQUIRE_TEST_FIXTURES is "
+                   << "set: the dependency-range fixture must be supplied, not skipped.";
+        }
+
+        GTEST_SKIP() << "No dependency-range fixture available. Set "
+                     << "TEST_PLUGIN_DEP_RANGE to tests/fixtures' built plugin.";
+    }
+
+    void TearDown() override {
+        clearModuleState();
+    }
+
+    // Discovers the fixture through the real registry entry point and returns
+    // the name it registered under.
+    std::string discover() {
+        char* name = logos_core_process_module(fixturePath.c_str());
+        EXPECT_NE(name, nullptr) << "process_module failed for " << fixturePath;
+        if (!name) return {};
+        std::string registered(name);
+        delete[] name;
+        return registered;
+    }
+};
+
+// The range survives the trip from the plugin's embedded metadata into the
+// registry's dependency entries. Fails the moment the registry keeps names and
+// drops constraints.
+TEST_F(RealDependencyRangeTest, EmbeddedRangeReachesTheRegistry) {
+    ASSERT_EQ(discover(), kFixtureModule);
+
+    const auto entries =
+        ModuleManager::registry().moduleDependencyEntries(kFixtureModule);
+    ASSERT_EQ(entries.size(), 1u) << "fixture declares exactly one dependency";
+    EXPECT_EQ(entries[0].name, kFixtureDep);
+    EXPECT_EQ(entries[0].versionRange, kFixtureRange)
+        << "the range declared in the plugin's embedded metadata was dropped "
+        << "before it reached ModuleInfo::dependencies";
+
+    // The name-only view the graph and the modules-info wire shape are built on
+    // is unchanged by carrying the constraint.
+    EXPECT_EQ(ModuleManager::registry().moduleDependencies(kFixtureModule),
+              (std::vector<std::string>{kFixtureDep}));
+}
+
+// ...and it decides. An installed dependency outside the declared range must be
+// refused; the refusal names the range, so a gate that saw no constraint cannot
+// produce this message.
+TEST_F(RealDependencyRangeTest, EmbeddedRangeRefusesAnOutOfRangeDependency) {
+    ASSERT_EQ(discover(), kFixtureModule);
+
+    logos_core_register_module(kFixtureDep, "/path/to/range_probe_dep");
+    ModuleManager::registry().registerModuleVersion(kFixtureDep, "1.2.3");
+
+    const auto gate = ModuleManager::dependencyGateFor(kFixtureModule);
+    EXPECT_EQ(gate.decision, LogosCore::DependencyGateDecision::Refuse)
+        << "installed 1.2.3 does not satisfy " << kFixtureRange
+        << ", so the gate must refuse; decision was "
+        << static_cast<int>(gate.decision);
+    EXPECT_EQ(gate.dependency, kFixtureDep);
+    EXPECT_EQ(gate.range, kFixtureRange);
+    EXPECT_EQ(gate.installedVersion, "1.2.3");
+    EXPECT_NE(gate.reason.find(kFixtureRange), std::string::npos) << gate.reason;
+}
+
+// Positive control on the same fixture: satisfy the range and the gate reports
+// Allow, not the Unconstrained a dropped constraint would yield.
+TEST_F(RealDependencyRangeTest, EmbeddedRangeAllowsAnInRangeDependency) {
+    ASSERT_EQ(discover(), kFixtureModule);
+
+    logos_core_register_module(kFixtureDep, "/path/to/range_probe_dep");
+    ModuleManager::registry().registerModuleVersion(kFixtureDep, "9.4.1");
+
+    EXPECT_EQ(ModuleManager::dependencyGateFor(kFixtureModule).decision,
+              LogosCore::DependencyGateDecision::Allow)
+        << "a satisfied range must read as Allow; Unconstrained here means the "
+        << "gate never saw the constraint the plugin declared";
+}
+
+// =============================================================================
+// The same production path, for a constraint that cannot be READ.
+//
+// `"version": 2` comes back empty from any string accessor, so a decoder that
+// only asks for the string unconstrains the edge and the gate waves it through
+// — the precise fail-open ModuleDependency::malformedConstraint exists to
+// refuse. The decode itself now lives in logos-module, so this fixture is what
+// proves the flag still survives the mapping at liblogos' boundary; break
+// toGateDependencies and EmbeddedMalformedConstraintRefuses goes red.
+//
+// The fixture also carries a bare-name entry alongside the malformed one, so
+// the mixed-form array is covered here rather than in a decode unit test.
+// =============================================================================
+
+namespace {
+// Mirrors tests/fixtures/dep_malformed_fixture.json.
+constexpr const char* kMalformedModule  = "dep_malformed_fixture";
+constexpr const char* kMalformedPlainDep = "plain_probe_dep";
+constexpr const char* kMalformedBadDep   = "malformed_probe_dep";
+}  // namespace
+
+class RealMalformedConstraintTest : public ::testing::Test {
+protected:
+    std::string fixturePath;
+
+    void SetUp() override {
+        clearModuleState();
+
+        const char* env = std::getenv("TEST_PLUGIN_DEP_MALFORMED");
+        if (env && std::strlen(env) > 0 && fs::exists(env)) {
+            fixturePath = env;
+            return;
+        }
+
+        // A skip renders as a pass, and a pass here would mean the fail-open is
+        // unguarded again. See RealDependencyRangeTest for the same contract.
+        const char* strict = std::getenv("LOGOS_REQUIRE_TEST_FIXTURES");
+        if (strict && std::strcmp(strict, "0") != 0) {
+            FAIL() << "TEST_PLUGIN_DEP_MALFORMED is unset or missing (got '"
+                   << (env ? env : "") << "') while LOGOS_REQUIRE_TEST_FIXTURES is "
+                   << "set: the malformed-constraint fixture must be supplied, "
+                   << "not skipped.";
+        }
+
+        GTEST_SKIP() << "No malformed-constraint fixture available. Set "
+                     << "TEST_PLUGIN_DEP_MALFORMED to tests/fixtures' built plugin.";
+    }
+
+    void TearDown() override { clearModuleState(); }
+
+    std::string discover() {
+        char* name = logos_core_process_module(fixturePath.c_str());
+        EXPECT_NE(name, nullptr) << "process_module failed for " << fixturePath;
+        if (!name) return {};
+        std::string registered(name);
+        delete[] name;
+        return registered;
+    }
+};
+
+// The flag survives the trip from the plugin's embedded metadata into the
+// registry's entries, and the bare-name sibling is left unconstrained.
+TEST_F(RealMalformedConstraintTest, EmbeddedMalformedConstraintReachesTheRegistry) {
+    ASSERT_EQ(discover(), kMalformedModule);
+
+    const auto entries =
+        ModuleManager::registry().moduleDependencyEntries(kMalformedModule);
+    ASSERT_EQ(entries.size(), 2u) << "fixture declares a bare and an object entry";
+    EXPECT_EQ(entries[0].name, kMalformedPlainDep);
+    EXPECT_FALSE(entries[0].malformedConstraint);
+    EXPECT_TRUE(entries[0].versionRange.empty());
+    EXPECT_EQ(entries[1].name, kMalformedBadDep);
+    EXPECT_TRUE(entries[1].malformedConstraint)
+        << "a non-string `version` reached the registry as an UNCONSTRAINED "
+        << "edge — the fail-open this flag exists to refuse";
+    EXPECT_TRUE(entries[1].versionRange.empty());
+}
+
+// ...and it refuses. Both dependencies are installed and readable, so nothing
+// but the unreadable constraint can produce this decision.
+TEST_F(RealMalformedConstraintTest, EmbeddedMalformedConstraintRefuses) {
+    ASSERT_EQ(discover(), kMalformedModule);
+
+    logos_core_register_module(kMalformedPlainDep, "/path/to/plain_probe_dep");
+    ModuleManager::registry().registerModuleVersion(kMalformedPlainDep, "1.0.0");
+    logos_core_register_module(kMalformedBadDep, "/path/to/malformed_probe_dep");
+    ModuleManager::registry().registerModuleVersion(kMalformedBadDep, "1.0.0");
+
+    const auto gate = ModuleManager::dependencyGateFor(kMalformedModule);
+    EXPECT_EQ(gate.decision, LogosCore::DependencyGateDecision::Refuse)
+        << "an unreadable constraint must refuse, not unconstrain the edge; "
+        << "decision was " << static_cast<int>(gate.decision);
+    EXPECT_EQ(gate.dependency, kMalformedBadDep);
+    EXPECT_NE(gate.reason.find("not a string"), std::string::npos) << gate.reason;
+}
+
+// =============================================================================
+// Snapshot listing — the record modules_state receives
+// =============================================================================
+//
+// `type` and `version` shipped hardcoded empty on this wire. They are the
+// module's own claims, and the only place they exist is the metadata.json
+// embedded in its plugin — which allModulesInfo already parses and hands to the
+// snapshot builder. These two tests pin both halves: the real value when the
+// blob is there, and "" (present, not omitted) when it is not.
+
+// The record for `module` in a snapshot listing, or a null json when absent.
+static nlohmann::json snapshotRecord(const nlohmann::json& listing,
+                                     const std::string& module) {
+    auto mods = listing.is_object() ? listing.find("modules") : listing.end();
+    if (mods == listing.end() || !mods->is_array())
+        return nlohmann::json();
+    for (const auto& r : *mods)
+        if (r.value("module", std::string{}) == module)
+            return r;
+    return nlohmann::json();
+}
+
+TEST_F(ModuleManagerTest, SnapshotListing_EmptyTypeAndVersionWithoutMetadata) {
+    // Registered but never processed: no plugin was read, so the registry holds
+    // no metadata blob and allModulesInfo reports `metadata` as null.
+    logos_core_register_module("module_a", "/path/to/module_a.dylib");
+
+    nlohmann::json listing = nlohmann::json::parse(
+        ModuleManager::buildSnapshotListingJson(), nullptr, /*allow_exceptions=*/false);
+    nlohmann::json rec = snapshotRecord(listing, "module_a");
+    ASSERT_TRUE(rec.is_object()) << "registered module absent from the snapshot";
+
+    // PRESENT AND EMPTY, not omitted: the wire type declares both as `tstr`,
+    // and the sentinel default here would survive a missing key.
+    EXPECT_EQ(rec.value("type", std::string{"<absent>"}), "");
+    EXPECT_EQ(rec.value("version", std::string{"<absent>"}), "");
+}
+
+TEST_F(RealModuleRegistryTest, SnapshotListing_CarriesEmbeddedTypeAndVersion) {
+    char* name = logos_core_process_module(modulePath.c_str());
+    ASSERT_NE(name, nullptr) << "process_module failed for " << modulePath;
+    std::string moduleName(name);
+    delete[] name;
+
+    // Read what the plugin declares back through the same registry JSON the
+    // snapshot is built from, rather than hardcoding the values of whichever
+    // module TEST_PLUGIN happens to point at.
+    char* json = logos_core_get_modules_info();
+    ASSERT_NE(json, nullptr);
+    nlohmann::json info = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
+    free(json);
+    ASSERT_TRUE(info.is_array());
+    nlohmann::json entry;
+    for (const auto& e : info)
+        if (e.value("name", std::string{}) == moduleName) { entry = e; break; }
+    ASSERT_TRUE(entry.is_object()) << "processed module absent from modules-info";
+    ASSERT_TRUE(entry["metadata"].is_object())
+        << "real plugin must yield a non-null metadata object";
+    const std::string declaredType = entry["metadata"].value("type", std::string{});
+    const std::string declaredVersion = entry["metadata"].value("version", std::string{});
+    ASSERT_FALSE(declaredVersion.empty())
+        << "built test modules declare a version in metadata.json";
+
+    nlohmann::json listing = nlohmann::json::parse(
+        ModuleManager::buildSnapshotListingJson(), nullptr, /*allow_exceptions=*/false);
+    nlohmann::json rec = snapshotRecord(listing, moduleName);
+    ASSERT_TRUE(rec.is_object()) << "processed module absent from the snapshot";
+
+    EXPECT_EQ(rec.value("version", std::string{}), declaredVersion)
+        << "the snapshot must carry the module's real version, not \"\"";
+    EXPECT_EQ(rec.value("type", std::string{}), declaredType);
 }
 
 // =============================================================================
@@ -936,6 +1433,29 @@ TEST_F(CascadeUnloadTest, UnloadWithDependents_RecursiveDependentsLeavesFirst) {
     EXPECT_EQ(logos_core_has_process("a"), 0);
     EXPECT_EQ(logos_core_has_process("b"), 0);
     EXPECT_EQ(logos_core_has_process("c"), 0);
+}
+
+// An OPTIONAL dependent must SURVIVE its dependency going away. That is the
+// half of "lifetime is managed externally" the teardown path owns: a module
+// that declared it can tolerate absence is not entitled to be killed when the
+// thing it tolerates disappears.
+TEST_F(CascadeUnloadTest, UnloadWithDependents_OptionalDependentSurvives) {
+    writeManifestsAndScan({{"provider", {}}, {"consumer", {}}});
+    setupLoaded("provider", {});
+    setupLoaded("consumer", {});
+
+    const char* opt[] = {"provider"};
+    logos_core_register_module_optional_dependencies("consumer", opt, 1);
+
+    ASSERT_EQ(logos_core_is_module_loaded("provider"), 1);
+    ASSERT_EQ(logos_core_is_module_loaded("consumer"), 1);
+
+    int result = logos_core_unload_module("provider", true);
+    EXPECT_EQ(result, 1);
+
+    EXPECT_EQ(logos_core_is_module_loaded("provider"), 0);
+    EXPECT_EQ(logos_core_is_module_loaded("consumer"), 1)
+        << "an optional dependent must not be cascaded down with its dependency";
 }
 
 TEST_F(CascadeUnloadTest, UnloadWithDependents_UnloadedDependentsIgnored) {
@@ -1199,11 +1719,63 @@ protected:
         return std::set<std::string>(v.begin(), v.end());
     }
 
+    // Register `name` with `deps` declared as OPTIONAL dependencies.
+    static void regOptional(const std::string& name,
+                            const std::vector<std::string>& deps) {
+        logos_core_register_module(name.c_str(), ("/fake/" + name).c_str());
+        std::vector<const char*> d;
+        for (const auto& s : deps) d.push_back(s.c_str());
+        logos_core_register_module_optional_dependencies(name.c_str(), d.data(),
+                                                         static_cast<int>(d.size()));
+    }
+
     // Minimal enforce policy with no explicit restrictions — turns derivation on.
     static const char* enforceEnvelope() {
         return "{\"version\":1,\"mode\":\"enforce\",\"restrictions\":{}}";
     }
 };
+
+// An OPTIONAL dependent is a caller too. The declaration is what grants the
+// right to call; whether the loader had to supply the target is a different
+// question. Without this the call is refused between two loaded modules and
+// the caller sees a default value rather than an error — the exact fail-open
+// shape that is hardest to diagnose from the call site.
+TEST_F(DerivedRestrictionsManagerTest, LoadedOptionalDependentIsAllowed) {
+    reg("b", {});
+    regOptional("a", {"b"});
+    logos_core_mark_module_loaded("b");
+    logos_core_mark_module_loaded("a");
+    ModuleManager::setAccessPolicy(enforceEnvelope());
+
+    EXPECT_EQ(derived("b"),
+              (std::set<std::string>{"a", "core", "core_service"}));
+}
+
+TEST_F(DerivedRestrictionsManagerTest, UnloadedOptionalDependentExcluded) {
+    reg("b", {});
+    regOptional("a", {"b"});
+    logos_core_mark_module_loaded("b");  // a left unloaded
+    ModuleManager::setAccessPolicy(enforceEnvelope());
+
+    EXPECT_EQ(derived("b"), (std::set<std::string>{"core", "core_service"}));
+}
+
+// Declaring a name in both edge sets must not double-count it into the list.
+TEST_F(DerivedRestrictionsManagerTest, RequiredAndOptionalDependentDedupes) {
+    reg("b", {});
+    logos_core_register_module("a", "/fake/a");
+    const char* d[] = {"b"};
+    logos_core_register_module_dependencies("a", d, 1);
+    logos_core_register_module_optional_dependencies("a", d, 1);
+    logos_core_mark_module_loaded("b");
+    logos_core_mark_module_loaded("a");
+    ModuleManager::setAccessPolicy(enforceEnvelope());
+
+    auto v = ModuleManager::computeDerivedAllowedCallers("b");
+    int occurrences = 0;
+    for (const auto& c : v) if (c == "a") ++occurrences;
+    EXPECT_EQ(occurrences, 1);
+}
 
 TEST_F(DerivedRestrictionsManagerTest, LoadedDependentPlusTrusted) {
     // a depends on b; both loaded. b's allowed callers = {a} ∪ trusted.
@@ -1296,4 +1868,83 @@ TEST_F(DerivedRestrictionsManagerTest, TrustedDependentNotDuplicated) {
 
     auto callers = ModuleManager::computeDerivedAllowedCallers("b");
     EXPECT_EQ(std::count(callers.begin(), callers.end(), std::string("core")), 1);
+}
+
+// ── The deny-by-default switch, both directions ─────────────────────────────
+//
+// These two are the contract for the operator-facing flag (`mode: "enforce"`,
+// reached as `logoscore --access-policy enforce` / `LogosBasecamp
+// --access-policy enforce`). They share one scenario deliberately: the SAME
+// undeclared pair must be allowed with the flag off and denied with it on, and
+// the declared pair must survive the flip. A change that denied everything
+// would pass the "denied" half on its own, so the declared-caller assertion is
+// the one carrying the weight.
+class DenyByDefaultFlagTest : public DerivedRestrictionsManagerTest {
+protected:
+    // target        — the module being reached
+    // declared      — loaded, and declares `target` as a dependency
+    // undeclared    — loaded, declares nothing (the shape D-a found in this
+    //                 tree: counter_qml calling package_manager with
+    //                 "dependencies": [])
+    void SetUp() override {
+        DerivedRestrictionsManagerTest::SetUp();
+        reg("target", {});
+        reg("declared", {"target"});
+        reg("undeclared", {});
+        logos_core_mark_module_loaded("target");
+        logos_core_mark_module_loaded("declared");
+        logos_core_mark_module_loaded("undeclared");
+    }
+};
+
+TEST_F(DenyByDefaultFlagTest, FlagOff_UndeclaredCallerStaysUnrestricted) {
+    // No policy installed — the default every host has today. Core derives
+    // nothing, so it registers NO restriction for `target`, and
+    // capability_module's unrestricted-target path leaves `undeclared ->
+    // target` working exactly as before.
+    EXPECT_TRUE(derived("target").empty());
+
+    // Same for a policy that isn't in enforce mode: still off, still open.
+    ModuleManager::setAccessPolicy(
+        "{\"version\":1,\"mode\":\"audit\",\"restrictions\":{}}");
+    EXPECT_TRUE(derived("target").empty());
+}
+
+TEST_F(DenyByDefaultFlagTest, FlagOn_DeclaredCallerAllowed_UndeclaredRefused) {
+    ModuleManager::setAccessPolicy(enforceEnvelope());
+
+    const auto callers = derived("target");
+    // A restriction IS registered now — that is what makes the target closed.
+    ASSERT_FALSE(callers.empty());
+    // The declared dependent keeps working…
+    EXPECT_TRUE(callers.count("declared"))
+        << "enforce must not break a caller that declared the target";
+    // …and the undeclared caller is not on the list, so capability_module
+    // refuses to mint it a token.
+    EXPECT_FALSE(callers.count("undeclared"))
+        << "enforce must refuse a caller that never declared the target";
+}
+
+TEST_F(DenyByDefaultFlagTest, FlagOn_ExplicitPolicyCanReadmitAnUndeclaredCaller) {
+    // The escape hatch an operator needs when a real deployment has a caller
+    // that legitimately can't declare its target (out-of-process ui_qml
+    // plugins, for one): an explicit entry replaces the derived list verbatim.
+    ModuleManager::setAccessPolicy(
+        "{\"version\":1,\"mode\":\"enforce\",\"restrictions\":{"
+        "\"target\":{\"allowedCallers\":[\"declared\",\"undeclared\"]}}}");
+
+    const auto callers = derived("target");
+    EXPECT_TRUE(callers.count("declared"));
+    EXPECT_TRUE(callers.count("undeclared"));
+}
+
+TEST_F(DenyByDefaultFlagTest, FlagIsReversible) {
+    // Clearing the policy must restore today's behaviour byte-for-byte, not
+    // leave a latched restriction behind (hosts call setAccessPolicy once per
+    // boot, but a restart in the same process must not inherit enforcement).
+    ModuleManager::setAccessPolicy(enforceEnvelope());
+    ASSERT_FALSE(derived("target").empty());
+
+    ModuleManager::setAccessPolicy("");
+    EXPECT_TRUE(derived("target").empty());
 }

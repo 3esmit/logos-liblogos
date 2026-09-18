@@ -8,33 +8,52 @@ endif()
 get_filename_component(LOGOS_CPP_SDK_ROOT "${LOGOS_CPP_SDK_ROOT}" ABSOLUTE)
 
 # The SDK stack since the Qt split: logos-protocol (transports + lp_* C
-# ABI), logos-qt-sdk (LogosAPI + provider glue — what this runtime's Qt
-# side uses), logos-cpp-sdk (Qt-free std headers). The `logos_sdk` alias
+# ABI), logos-qt-host (LogosAPI + provider glue — the Qt HOST RUNTIME this
+# library links), logos-cpp-sdk (Qt-free std headers). The `logos_sdk` alias
 # is kept so the rest of this file (and the host targets) stay unchanged;
-# it now points at logos-qt-sdk, whose link interface chains
-# logos-protocol and its OpenSSL/Boost/nlohmann deps.
+# it points at logos-qt-host, whose link interface chains logos-protocol
+# and its OpenSSL/Boost/nlohmann deps.
+#
+# The host runtime used to be COMPILED INTO logos-qt-sdk and reached here as
+# logos-qt-sdk::logos_qt_sdk. The code now lives in logos-plugin-qt, which
+# publishes it as logos-qt-host::logos_qt_host. logos-qt-sdk keeps only the
+# developer layer (the UI plugin context, the LpBridge/wire headers, the Qt
+# generator) — none of which this library compiles against — so the host
+# runtime is found DIRECTLY here rather than arriving as a transitive
+# dependency of find_package(logos-qt-sdk). This repo still consumes
+# logos-qt-sdk as a nix input, but only to re-export those developer headers
+# from nix/include.nix; nothing in this CMake build needs it.
 if(NOT DEFINED LOGOS_PROTOCOL_ROOT AND DEFINED ENV{LOGOS_PROTOCOL_ROOT})
   set(LOGOS_PROTOCOL_ROOT "$ENV{LOGOS_PROTOCOL_ROOT}")
 endif()
-if(NOT DEFINED LOGOS_QT_SDK_ROOT AND DEFINED ENV{LOGOS_QT_SDK_ROOT})
-  set(LOGOS_QT_SDK_ROOT "$ENV{LOGOS_QT_SDK_ROOT}")
+if(NOT DEFINED LOGOS_QT_HOST_ROOT AND DEFINED ENV{LOGOS_QT_HOST_ROOT})
+  set(LOGOS_QT_HOST_ROOT "$ENV{LOGOS_QT_HOST_ROOT}")
 endif()
 
 if(EXISTS "${LOGOS_PROTOCOL_ROOT}/lib/cmake/logos-protocol"
-   AND EXISTS "${LOGOS_QT_SDK_ROOT}/lib/cmake/logos-qt-sdk")
+   AND EXISTS "${LOGOS_QT_HOST_ROOT}/lib/cmake/logos-qt-host")
   message(STATUS "Using logos-protocol at ${LOGOS_PROTOCOL_ROOT}")
-  message(STATUS "Using logos-qt-sdk at ${LOGOS_QT_SDK_ROOT}")
+  message(STATUS "Using logos-qt-host at ${LOGOS_QT_HOST_ROOT}")
   find_package(logos-protocol REQUIRED
     PATHS "${LOGOS_PROTOCOL_ROOT}/lib/cmake/logos-protocol" NO_DEFAULT_PATH)
-  find_package(logos-qt-sdk REQUIRED
-    PATHS "${LOGOS_QT_SDK_ROOT}/lib/cmake/logos-qt-sdk" NO_DEFAULT_PATH)
+  find_package(logos-qt-host REQUIRED
+    PATHS "${LOGOS_QT_HOST_ROOT}/lib/cmake/logos-qt-host" NO_DEFAULT_PATH)
   if(NOT TARGET logos_sdk)
     add_library(logos_sdk INTERFACE IMPORTED)
-    target_link_libraries(logos_sdk INTERFACE logos-qt-sdk::logos_qt_sdk)
+    # The SHARED Qt host runtime, not the static archive. This is the line that
+    # replaces the whole-archive + generated-.def block further down: it makes
+    # liblogos_core a CONSUMER of the runtime rather than its provider, so
+    # TokenManager / LogosAPIClient / LogosAPI each have exactly one definition
+    # in the process because there is exactly one library defining them.
+    #
+    # logos_qt_host_shared itself PUBLIC-links logos_protocol_shared, so the
+    # protocol half arrives transitively and correctly layered -- it is asserted
+    # in logos-plugin-qt by checks.shared-runtime-layering.
+    target_link_libraries(logos_sdk INTERFACE logos-qt-host::logos_qt_host_shared)
   endif()
 else()
-  message(FATAL_ERROR "logos-protocol / logos-qt-sdk not found. Set "
-                      "LOGOS_PROTOCOL_ROOT and LOGOS_QT_SDK_ROOT to built packages.")
+  message(FATAL_ERROR "logos-protocol / logos-qt-host not found. Set "
+                      "LOGOS_PROTOCOL_ROOT and LOGOS_QT_HOST_ROOT to built packages.")
 endif()
 
 # Qt-free base SDK headers (logos_module_context.h etc.) — header-only.
@@ -162,8 +181,12 @@ set(LOGOS_CORE_SOURCES
     logos_core/module_registry.h
     logos_core/dependency_resolver.cpp
     logos_core/dependency_resolver.h
+    logos_core/dependency_gate.cpp
+    logos_core/dependency_gate.h
     logos_core/access_policy.cpp
     logos_core/access_policy.h
+    logos_core/module_state_observer.cpp
+    logos_core/module_state_observer.h
     logos_core/module_manager.cpp
     logos_core/module_manager.h
     logos_core/module_loader.h
@@ -197,78 +220,43 @@ target_compile_definitions(logos_core PRIVATE LOGOS_CORE_LIBRARY)
 # Do not reinstate it; if the C API ever stops being exported, the cause is a
 # missing LOGOS_CORE_EXPORT on a declaration, not a missing linker flag.
 #
-# The C API is not the whole story, though. Narrowing the export table to it was
-# what made main_ui link again, but it also left every in-process image with its
+# The C API is not the whole story, and the rest of it is no longer solved here.
+#
+# Narrowing the export table to the C API left every in-process image with its
 # own statically linked copy of the shared C++ runtime -- and therefore its own
 # TokenManager singleton, so a capability token saved by the host was invisible
-# to the UI plugin and every cross-module call was refused. ELF and Mach-O
-# interpose these symbols across the process and get one instance for free; PE
-# does not. The block below closes that gap the only way PE allows: liblogos_core
-# publishes the shared types EXPLICITLY, and the in-process consumers import them
-# instead of re-linking them. Neither horn of the old dilemma -- export
-# everything and collide, or export nothing and duplicate -- is taken.
+# to the UI plugin and every cross-module call was refused. This file used to
+# close that gap by absorbing liblogos_protocol.a and liblogos_qt_host.a whole
+# (--whole-archive) and re-publishing their symbols through a generated .def, so
+# that liblogos_core became the single provider for types it does not own.
+#
+# It is not the provider any more. logos-protocol and logos-qt-host now ship
+# REAL SHARED LIBRARIES that own their own symbols -- liblogos_protocol exports
+# its table from a generated .def of its own (logos-protocol#65), and
+# liblogos_qt_host owns LogosAPI (logos-plugin-qt#22). liblogos_core links them
+# like any other dependency and IMPORTS the runtime instead of defining it.
+#
+# So this whole block is gone, along with cmake/gen-shared-exports.sh. What
+# replaces it is one line: logos_sdk carries logos_qt_host_shared rather than
+# the static archive, near the top of this file.
+#
+# WHAT DID NOT CHANGE is the invariant. The runtime must still exist exactly
+# once per process; it is now enforced by there being one shared library per
+# type rather than by one image absorbing everything. Consumers still empty
+# their static archives (that was logos-basecamp/cmake/LogosSharedFromDll.cmake,
+# deleted in logos-basecamp#348 and logos-logoscore-cli#98 once they linked the
+# shared libraries directly and had no second static copy left to suppress) so ld
+# cannot pull an archive member that would redefine an imported symbol, and
+# logos-basecamp/nix/symbol-gate.nix still asserts the result.
+#
+# OUT-OF-PROCESS consumers are deliberately unaffected: module plugins and
+# ui_qml backends keep linking the STATIC archive, because each runs in its own
+# process where its own copy is the CORRECT per-process singleton, and because a
+# .lgx records an empty nix closure and could not carry a shared library anyway.
 #
 # Full rationale, including why the consumer-side __declspec(dllimport) is the
 # load-bearing half rather than the export, lives in
 # logos-protocol/cpp/logos_shared_api.h.
-if(WIN32 AND TARGET logos-protocol::logos_protocol AND TARGET logos-qt-sdk::logos_qt_sdk)
-    # Ask the imported targets where their archives actually are rather than
-    # rebuilding the path by hand, so a rename or a layout change fails at
-    # generate time instead of producing an empty export list.
-    set(_logos_protocol_archive "$<TARGET_FILE:logos-protocol::logos_protocol>")
-    set(_logos_qt_sdk_archive   "$<TARGET_FILE:logos-qt-sdk::logos_qt_sdk>")
-
-    # --whole-archive, i.e. the whole of both libraries goes into the DLL even
-    # where liblogos itself never calls it.
-    #
-    # This is not gold-plating; it is what makes "single provider" true rather
-    # than approximate. The consumers link an EMPTY stand-in for these archives
-    # (logos-basecamp/cmake/LogosSharedFromDll.cmake) because ld would otherwise
-    # pull members for incidental reasons -- it was observed pulling
-    # logos_api.cpp.obj to satisfy std::string's move constructor -- and each
-    # pulled object collides with our export. Once the consumer has no archive to
-    # fall back on, anything the DLL failed to include becomes an undefined
-    # reference in a downstream repo. Linking normally would include only the
-    # objects liblogos happens to reference, which is a moving target.
-    target_link_options(logos_core PRIVATE
-        "-Wl,--whole-archive"
-        "${_logos_protocol_archive}"
-        "${_logos_qt_sdk_archive}"
-        "-Wl,--no-whole-archive")
-
-    # CMAKE_NM is normally set by the toolchain file; fall back to the
-    # cross-prefixed binary so a plain `cmake -DCMAKE_TOOLCHAIN_FILE=...` still
-    # generates. A missing nm must fail here, loudly, rather than silently
-    # emitting an empty .def and restoring the split-brain.
-    set(_logos_nm "${CMAKE_NM}")
-    if(NOT _logos_nm)
-        find_program(_logos_nm NAMES "${CMAKE_CXX_COMPILER_TARGET}-nm" x86_64-w64-mingw32-nm nm)
-    endif()
-    if(NOT _logos_nm)
-        message(FATAL_ERROR "nm not found; cannot generate the liblogos_core export definition")
-    endif()
-
-    set(_logos_shared_def "${CMAKE_CURRENT_BINARY_DIR}/logos_core_shared_exports.def")
-    add_custom_command(
-        OUTPUT "${_logos_shared_def}"
-        COMMAND ${CMAKE_COMMAND} -E env sh
-                "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/gen-shared-exports.sh"
-                "${_logos_nm}" "${_logos_shared_def}"
-                "${_logos_protocol_archive}" "*"
-                "${_logos_qt_sdk_archive}"   "*"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/gen-shared-exports.sh"
-                "${_logos_protocol_archive}" "${_logos_qt_sdk_archive}"
-        COMMENT "Generating liblogos_core shared-runtime export definition"
-        VERBATIM
-    )
-    add_custom_target(logos_core_shared_exports DEPENDS "${_logos_shared_def}")
-    add_dependencies(logos_core logos_core_shared_exports)
-
-    # A .def passed to the link ADDS to the export table; the ~18
-    # __declspec(dllexport) logos_core_* C API entries survive alongside it.
-    target_link_options(logos_core PRIVATE "${_logos_shared_def}")
-    set_property(TARGET logos_core APPEND PROPERTY LINK_DEPENDS "${_logos_shared_def}")
-endif()
 
 # Portable build: selects portable LGX variants instead of dev variants
 option(LOGOS_PORTABLE_BUILD "Build for portable variant selection" OFF)
@@ -307,6 +295,30 @@ if(DEFINED LOGOS_PACKAGE_MANAGER_ROOT AND EXISTS "${LOGOS_PACKAGE_MANAGER_ROOT}/
       IMPORTED_IMPLIB "${LOGOS_PACKAGE_MANAGER_LIBRARY}"
     )
   endif()
+
+  # liblgx, for the semver the dependency gate evaluates ranges with. It ships
+  # in the same root (lgx.h is already on package_manager_lib's include dirs)
+  # but package_manager_lib only IMPORTS it, so it must be named here too.
+  find_library(LOGOS_LGX_LIBRARY
+    NAMES lgx
+    PATHS "${LOGOS_PACKAGE_MANAGER_ROOT}/lib"
+    NO_DEFAULT_PATH
+  )
+
+  if(NOT LOGOS_LGX_LIBRARY)
+    message(FATAL_ERROR "lgx not found in ${LOGOS_PACKAGE_MANAGER_ROOT}/lib")
+  endif()
+
+  add_library(lgx_lib SHARED IMPORTED)
+  set_target_properties(lgx_lib PROPERTIES
+    IMPORTED_LOCATION "${LOGOS_LGX_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${LOGOS_PACKAGE_MANAGER_ROOT}/include"
+  )
+  if(WIN32)
+    set_target_properties(lgx_lib PROPERTIES
+      IMPORTED_IMPLIB "${LOGOS_LGX_LIBRARY}"
+    )
+  endif()
 else()
   message(FATAL_ERROR "LOGOS_PACKAGE_MANAGER_ROOT not set or ${LOGOS_PACKAGE_MANAGER_ROOT}/lib does not exist")
 endif()
@@ -327,6 +339,7 @@ target_link_libraries(logos_core PUBLIC
     LogosContainerImpl::impl
     LogosFormatLoaderImpl::impl
     package_manager_lib
+    lgx_lib
     nlohmann_json::nlohmann_json
     Boost::process
     spdlog::spdlog
