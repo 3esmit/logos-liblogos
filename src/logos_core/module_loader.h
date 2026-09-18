@@ -1,7 +1,9 @@
 #ifndef MODULE_LOADER_H
 #define MODULE_LOADER_H
 
+#include <logos_container/load_status.h>
 #include <logos_container/module_descriptor.h>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -40,6 +42,14 @@ public:
 
     // Deliver the auth token to the named module. Called immediately after a successful load().
     virtual bool sendToken(const std::string& name, const std::string& token) = 0;
+
+    // Wait, bounded, for what load() cannot know: whether the module's plugin
+    // actually loaded. Unknown — the default — means the loader cannot tell,
+    // and leaves the caller exactly where it was before this existed.
+    virtual LoadOutcome awaitLoad(const std::string& /*name*/,
+                                  std::chrono::milliseconds /*timeout*/) {
+        return {};
+    }
 
     // Terminate a single module by name.
     virtual void terminate(const std::string& name) = 0;
@@ -80,6 +90,16 @@ public:
 
     virtual std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash>
     getAllInstancePids() const = 0;
+
+    // Wait for the exact runtime to report whether its plugin loaded. The
+    // default preserves compatibility with older instance-aware loaders and
+    // leaves explicit instances Unknown when they cannot observe the verdict.
+    virtual LoadOutcome awaitLoadInstance(
+        const ModuleAddress& address, std::chrono::milliseconds timeout)
+    {
+        if (address.isDefaultInstance()) return awaitLoad(address.moduleName, timeout);
+        return {};
+    }
 };
 
 } // namespace LogosCore

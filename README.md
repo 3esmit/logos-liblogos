@@ -170,6 +170,52 @@ char* logos_core_get_token(const char* key);
 
 See `src/logos_core/logos_core.h` for the full API.
 
+### Inter-module access enforcement (off by default)
+
+By default a loaded module may call any other loaded module. Enforcement is
+opt-in, and `mode` in the access policy is the switch:
+
+```jsonc
+{"version": 1, "mode": "enforce"}
+```
+
+Installing that document (via `logos_core_set_access_policy`, before
+`logos_core_start()`) turns on **deny-by-default**: for every loaded target,
+core derives the allowed callers from the declared dependency graph — the
+target's loaded dependents, plus the trusted `core` / `core_service` — and
+registers them with capability_module. A module that never declared the target
+as a dependency is refused a token, so its call can never proceed, and
+capability_module logs the refusal with both names:
+
+```
+[capability_module] access policy denies 'caller_module' -> 'target_module'
+```
+
+Anything other than `mode: "enforce"` — no policy, `NULL`, `""`, unparseable
+JSON, a different mode — leaves enforcement **off**, which is the pre-existing
+behaviour. Core says which side it landed on at startup, so a mistyped mode is
+visible rather than silently permissive:
+
+```
+Inter-module access enforcement is ON (mode=enforce): deny-by-default — ...
+Inter-module access enforcement is OFF (no access policy set): ...
+```
+
+A `restrictions` entry overrides the derived list for that target verbatim,
+which is the escape hatch for callers that legitimately cannot declare their
+target (out-of-process `ui_qml` plugins are not tracked as dependents, so they
+need an explicit entry):
+
+```jsonc
+{"version": 1, "mode": "enforce",
+ "restrictions": {"accounts_module": {"allowedCallers": ["accounts_ui"]}}}
+```
+
+`capability_module`, `core` and `core_service` are never restricted as targets.
+
+Hosts expose this as `--access-policy` — see the logoscore CLI and Basecamp
+READMEs.
+
 ### Thread safety
 
 Module load/unload operations (`logos_core_load_module`, `logos_core_unload_module`) are serialised internally by a single mutex. It is safe to call them concurrently from multiple threads, including rapid and repeated load/unload cycles on the same module — each call waits for its turn and the process management layer handles teardown cleanly before the next launch. `logos_core_unload_module` with `with_dependents=true` in particular holds the lock for its entire leaves-first teardown so a late-arriving load can't interleave between tearing down a dependent and its parent.
@@ -177,6 +223,43 @@ Module load/unload operations (`logos_core_load_module`, `logos_core_unload_modu
 `logos_core_refresh_modules` is synchronised through the module registry's reader-writer lock — it is safe to call concurrently with other registry accesses, but it is **not** serialised against load/unload by the same mutex as above.
 
 Read-only accessors (`logos_core_get_known_modules`, `logos_core_get_loaded_modules`) use that shared reader-writer lock and are safe to call concurrently with each other and with `logos_core_refresh_modules`.
+
+## Module lifecycle observer
+
+`src/logos_core/module_state_observer.h` turns lifecycle changes into
+structured, sequenced facts. Until it existed, load/unload/crash were
+`spdlog::info` lines and registry membership changes were silent, so every
+consumer polled — `logos-basecamp` runs a 2s `QTimer` and infers module state
+from package-install events.
+
+It reports; it does not drive anything. Transitions go to a **sink**, and with
+none installed `record()` early-outs before it allocates, so a host that
+consumes nothing pays nothing. The sink that pushes to `modules_state` is in
+`module_manager.cpp`.
+
+States: `unloaded`, `loading`, `loaded`, `stopping`, `error`, plus the
+event-only `absent`, which names the two membership edges (`absent -> unloaded`
+on discovery, `unloaded -> absent` on prune).
+
+Two rules govern every call site, and both are load-bearing:
+
+- **Never dispatch under `loadMutex()`.** `record()` buffers; `flush()`
+  dispatches, and entry points declare `ScopedModuleStateFlush` *before* their
+  lock guard so it is destroyed *after* it. A sink doing an RPC from inside the
+  load path while holding that lock is the shape of two failures already paid
+  for here: the ui-host startup token deadlock, and a ~417s Basecamp stall from
+  a synchronous call to an absent module.
+
+- **One `seq` counter, for deltas and snapshots alike.** Consumers apply a
+  transition only when its `seq` beats what they hold, and tombstone a departed
+  record at a seq. A second counter makes that tombstone unreachably high (a
+  real later delta dropped forever) or trivially low (a stale delta resurrecting
+  a pruned module).
+
+`onTerminated` fires for both an orderly unload and a module that died, so
+teardown announces intent before `terminate()` and the callback consumes it.
+Host shutdown announces every loaded module first — without that, a clean exit
+reports the whole fleet as crashed.
 
 ## Dev vs Portable Builds
 

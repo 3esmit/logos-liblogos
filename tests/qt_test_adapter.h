@@ -40,6 +40,23 @@ inline void logos_core_register_module_dependencies(const char* name,
     ModuleManager::registry().registerDependencies(std::string(name), stdDeps);
 }
 
+inline void logos_core_register_module_optional_dependencies(const char* name,
+                                                             const char** deps,
+                                                             int count)
+{
+    if (!name) return;
+    std::vector<std::string> stdDeps;
+    for (int i = 0; i < count; ++i)
+        if (deps && deps[i]) stdDeps.push_back(std::string(deps[i]));
+    ModuleManager::registry().registerOptionalDependencies(std::string(name), stdDeps);
+}
+
+inline char** logos_core_get_module_optional_dependencies_test(const char* name)
+{
+    if (!name) return nullptr;
+    return ModuleManager::getOptionalDependenciesCStr(name);
+}
+
 inline int logos_core_is_module_known(const char* name)
 {
     if (!name) return 0;
@@ -98,22 +115,53 @@ inline char* logos_core_get_modules_dir_at(int index)
 // Dependency resolution
 // ---------------------------------------------------------------------------
 
+// The null-terminated char** every resolve shim below hands back. Extracted
+// when the best-effort shims arrived rather than copied a third time.
+inline char** toCArray(const std::vector<std::string>& v)
+{
+    std::size_t n = v.size();
+    char** result = new char*[n + 1];
+    for (std::size_t i = 0; i < n; ++i) {
+        result[i] = new char[v[i].size() + 1];
+        memcpy(result[i], v[i].c_str(), v[i].size() + 1);
+    }
+    result[n] = nullptr;
+    return result;
+}
+
+// Best-effort resolution, for the tests that need to see BOTH halves of the
+// answer. Two shims over one call rather than an out-parameter: a test reads
+// one property at a time, and the C-array marshalling is already the noisiest
+// thing in this file.
+inline char* logos_core_optional_load_report(const char* module_name)
+{
+    return ModuleManager::optionalLoadReportCStr(module_name);
+}
+
+inline char** logos_core_resolve_dependencies_best_effort(const char** names, int count)
+{
+    std::vector<std::string> requested;
+    for (int i = 0; i < count; ++i)
+        if (names && names[i]) requested.push_back(std::string(names[i]));
+    return toCArray(ModuleManager::resolveDependenciesBestEffort(requested).order);
+}
+
+// The subset of the above whose load failure a caller must tolerate.
+inline char** logos_core_resolve_best_effort_names(const char** names, int count)
+{
+    std::vector<std::string> requested;
+    for (int i = 0; i < count; ++i)
+        if (names && names[i]) requested.push_back(std::string(names[i]));
+    return toCArray(ModuleManager::resolveDependenciesBestEffort(requested).bestEffort);
+}
+
 inline char** logos_core_resolve_dependencies(const char** names, int count)
 {
     std::vector<std::string> requested;
     for (int i = 0; i < count; ++i)
         if (names && names[i]) requested.push_back(std::string(names[i]));
 
-    std::vector<std::string> resolved = ModuleManager::resolveDependencies(requested);
-
-    std::size_t n = resolved.size();
-    char** result = new char*[n + 1];
-    for (std::size_t i = 0; i < n; ++i) {
-        result[i] = new char[resolved[i].size() + 1];
-        memcpy(result[i], resolved[i].c_str(), resolved[i].size() + 1);
-    }
-    result[n] = nullptr;
-    return result;
+    return toCArray(ModuleManager::resolveDependencies(requested));
 }
 
 // ---------------------------------------------------------------------------

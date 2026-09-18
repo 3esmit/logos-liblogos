@@ -24,6 +24,8 @@ public:
               LoadedModuleHandle& out) override;
 
     bool sendToken(const std::string& name, const std::string& token) override;
+    LoadOutcome awaitLoad(const std::string& name,
+                          std::chrono::milliseconds timeout) override;
     void terminate(const std::string& name) override;
     void terminateAll() override;
     bool hasModule(const std::string& name) const override;
@@ -40,6 +42,8 @@ public:
     std::optional<int64_t> instancePid(const ModuleAddress& address) const override;
     std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash>
     getAllInstancePids() const override;
+    LoadOutcome awaitLoadInstance(const ModuleAddress& address,
+                                  std::chrono::milliseconds timeout) override;
 
     ModuleContainer& container() { return *container_; }
     const ModuleContainer& container() const { return *container_; }

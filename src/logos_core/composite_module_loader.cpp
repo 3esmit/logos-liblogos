@@ -35,6 +35,12 @@ bool CompositeModuleLoader::sendToken(const std::string& name, const std::string
     return container_->sendToken(name, token);
 }
 
+LoadOutcome CompositeModuleLoader::awaitLoad(const std::string& name,
+                                             std::chrono::milliseconds timeout)
+{
+    return container_->awaitLoad(name, timeout);
+}
+
 void CompositeModuleLoader::terminate(const std::string& name)
 {
     container_->terminate(name);
@@ -58,6 +64,14 @@ std::optional<int64_t> CompositeModuleLoader::pid(const std::string& name) const
 std::unordered_map<std::string, int64_t> CompositeModuleLoader::getAllPids() const
 {
     return container_->getAllPids();
+}
+
+LoadOutcome CompositeModuleLoader::awaitLoadInstance(
+    const ModuleAddress& address, std::chrono::milliseconds timeout)
+{
+    InstanceAwareModuleContainer* container = instanceContainer();
+    if (!container) return {};
+    return container->awaitLoadInstance(address, timeout);
 }
 
 InstanceAwareModuleContainer* CompositeModuleLoader::instanceContainer() const

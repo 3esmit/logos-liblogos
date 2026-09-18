@@ -31,6 +31,10 @@ jobs:
 
     - name: Build logos-liblogos-tests
       run: nix build .#logos-liblogos-tests
-    
-    - name: Run logos_core_test
-      run: ./result/bin/logos_core_tests
+
+    # Run the check, not ./result/bin directly: only the check supplies
+    # TEST_PLUGIN and the dependency-range fixture. Without them the nine
+    # real-plugin tests SKIP, and a skip renders as a pass -- a green CI that
+    # proves nothing about the discovery -> gate path.
+    - name: Run logos_core_tests
+      run: nix build -L ".#checks.$(nix eval --impure --raw --expr builtins.currentSystem).tests"

@@ -15,10 +15,10 @@ program**, built against **this** liblogos commit:
    under test.
 2. Build the `lgpm` package manager and install two real modules
    ([`capability_module`](https://github.com/logos-co/logos-capability-module)
-   and [`accounts_module`](https://github.com/logos-co/logos-accounts-module))
+   and [`test_basic_module`](https://github.com/logos-co/logos-test-modules))
    into a local modules directory.
 3. Write a ~50-line C++ program that links `liblogos_core`, then calls the C
-   API to start the runtime and load `accounts_module`.
+   API to start the runtime and load `test_basic_module`.
 4. Build that program against this liblogos and run it — watching the module
    come up over liblogos' own IPC.
 
@@ -33,7 +33,7 @@ an embeddable library, not just through the `logoscore` frontend.
 > as `logoscore` and basecamp do. You do **not** need to run Qt's event loop;
 > the load calls are synchronous.
 
-**What you'll build:** A standalone C++ program that links `liblogos_core` from this commit and loads the real `accounts_module` through the C API.
+**What you'll build:** A standalone C++ program that links `liblogos_core` from this commit and loads a real module — `test_basic_module` — through the C API.
 
 **What you'll learn:**
 
@@ -83,7 +83,7 @@ header, and the `logos_host` binary.
 ### 1.1 Build the library
 
 ```bash
-nix build 'github:logos-co/logos-liblogos/5f8139723702a8fff7eee6ae20c042be1c72159f' -o ./liblogos
+nix build 'github:logos-co/logos-liblogos' -o ./liblogos
 ```
 
 The result has three things your program depends on:
@@ -105,8 +105,8 @@ ls liblogos/include/logos_core.h liblogos/lib/liblogos_core.dylib liblogos/bin/l
 
 The runtime discovers modules from a directory of installed packages. We
 build the `lgpm` package manager and two real modules' `.lgx` packages,
-then install them in the next step. `accounts_module` is loaded through the
-host's capability layer, so we install `capability_module` alongside it.
+then install them in the next step. `test_basic_module` is loaded through
+the host's capability layer, so we install `capability_module` alongside it.
 
 ### 2.1 Build lgpm
 
@@ -128,20 +128,22 @@ The `.lgx` package is under `./cap-lgx/`:
 ls cap-lgx/*.lgx
 ```
 
-### 2.3 Build the accounts module's .lgx
+### 2.3 Build the test module's .lgx
 
-This compiles the module and its SDK dependencies through Nix (the
-accounts module wraps the go-wallet-sdk C library), so the first build
-is slow.
+`logos-test-modules` publishes each of its modules under
+`modules.<system>.<name>`, so the attribute path carries the Nix system
+double — `builtins.currentSystem` supplies it.
 
 ```bash
-nix build 'github:logos-co/logos-accounts-module#lgx' -o accounts-lgx
+SYSTEM=$(nix eval --impure --raw --expr 'builtins.currentSystem')
+nix build "github:logos-co/logos-test-modules#modules.$SYSTEM.test_basic_module.lgx" -o module-lgx
+
 ```
 
-The `.lgx` package is under `./accounts-lgx/`:
+The `.lgx` package is under `./module-lgx/`:
 
 ```bash
-ls accounts-lgx/*.lgx
+ls module-lgx/*.lgx
 ```
 
 ---
@@ -159,10 +161,10 @@ builds, so we pass `--allow-unsigned`.
 ./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file cap-lgx/*.lgx
 ```
 
-### 3.2 Install accounts_module
+### 3.2 Install test_basic_module
 
 ```bash
-./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file accounts-lgx/*.lgx
+./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file module-lgx/*.lgx
 ```
 
 ### 3.3 Confirm both modules are installed
@@ -191,7 +193,7 @@ The whole lifecycle in one `main()`:
   cannot read plugin metadata from a relative path).
 - `logos_core_init` → `logos_core_add_modules_dir` → `logos_core_start`
   (this discovers modules and brings up `capability_module`).
-- `logos_core_load_module(name, true)` loads the requested module and
+- `logos_core_load_module(name, LOGOS_LOAD_REQUIRED_DEPS)` loads the requested module and
   its dependencies; the module list accessors confirm what is up.
 
 ```cpp
@@ -223,7 +225,7 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
 
     const char* modulesArg = (argc > 1) ? argv[1] : "./modules";
-    const char* moduleName = (argc > 2) ? argv[2] : "accounts_module";
+    const char* moduleName = (argc > 2) ? argv[2] : "test_basic_module";
 
     // logos_core needs an absolute modules directory: it cannot read
     // plugin metadata from a relative path. Resolve it up front.
@@ -244,7 +246,7 @@ int main(int argc, char** argv) {
     printList("Discovered modules", logos_core_get_known_modules());
 
     printf("Loading '%s' (with dependencies)...\n", moduleName);
-    int ok = logos_core_load_module(moduleName, /*with_dependencies=*/true);
+    int ok = logos_core_load_module(moduleName, LOGOS_LOAD_REQUIRED_DEPS);
     printf("Load %s\n", ok ? "OK" : "FAILED");
     printList("Loaded modules", logos_core_get_loaded_modules());
 
@@ -322,18 +324,18 @@ Run the program. It needs two things in the environment:
   module (here, the one from the library we built).
 - `QT_QPA_PLATFORM=offscreen` — so Qt needs no display.
 
-We point it at `./modules` and ask it to load `accounts_module`.
+We point it at `./modules` and ask it to load `test_basic_module`.
 
-### 6.1 Load accounts_module through the C API
+### 6.1 Load test_basic_module through the C API
 
 ```bash
 export LOGOS_HOST_PATH="$PWD/liblogos/bin/logos_host"
 export QT_QPA_PLATFORM=offscreen
-./embed-app/build/logos_embed_app ./modules accounts_module
+./embed-app/build/logos_embed_app ./modules test_basic_module
 ```
 
 The output shows the runtime starting, discovering both modules,
-bringing up `capability_module`, then loading `accounts_module` (a real
+bringing up `capability_module`, then loading `test_basic_module` (a real
 subprocess launched via `logos_host` and wired up over liblogos' IPC):
 
 ```
@@ -342,13 +344,13 @@ Starting (modules dir: .../modules)
 Module loaded: capability_module
 Discovered modules:
   - capability_module
-  - accounts_module
-Loading 'accounts_module' (with dependencies)...
-Module loaded: accounts_module
+  - test_basic_module
+Loading 'test_basic_module' (with dependencies)...
+Module loaded: test_basic_module
 Load OK
 Loaded modules:
   - capability_module
-  - accounts_module
+  - test_basic_module
 ```
 
 That is your own program — not the `logoscore` CLI — running a real
@@ -360,7 +362,7 @@ module on top of this liblogos.
 
 The C API loads and manages modules; it does not call their methods (that
 goes over the typed IPC bridge, which the frontends wrap). To see what
-`accounts_module` exposes, introspect the installed plugin with `lm`, the
+`test_basic_module` exposes, introspect the installed plugin with `lm`, the
 module inspector from [`logos-module`](https://github.com/logos-co/logos-module).
 
 ### 7.1 Build lm
@@ -372,7 +374,7 @@ nix build 'github:logos-co/logos-module#lm' -o lm
 ### 7.2 List the module's invokable methods
 
 ```bash
-lm methods ./modules/accounts_module/accounts_module_plugin.dylib
+lm methods ./modules/test_basic_module/test_basic_module_plugin.dylib
 ```
 
 These are the `Q_INVOKABLE` methods the module you just loaded exposes —

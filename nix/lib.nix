@@ -4,6 +4,9 @@
 let
   # Extract the package-manager root from CMake flags
   logosPackageManagerRoot = common.env.LOGOS_PACKAGE_MANAGER_ROOT;
+  # The shared runtime liblogos_core now IMPORTS rather than defines.
+  logosProtocolRoot = common.env.LOGOS_PROTOCOL_ROOT;
+  logosQtHostRoot = common.env.LOGOS_QT_HOST_ROOT;
 in
 pkgs.runCommand "${common.pname}-lib-${common.version}"
   {
@@ -39,12 +42,57 @@ pkgs.runCommand "${common.pname}-lib-${common.version}"
       exit 1
     fi
 
-    # Bundle package_manager_lib alongside logos_core (logos_core links against it)
-    for f in ${logosPackageManagerRoot}/lib/libpackage_manager_lib*; do
+    # Bundle package_manager_lib alongside logos_core (logos_core links against
+    # it), and liblgx, which logos_core now links DIRECTLY for the dependency
+    # gate's semver. Before that, liblgx was reached only through the absolute
+    # store path baked into libpackage_manager_lib; now liblogos_core records
+    # @rpath/liblgx and its only LC_RPATH is @loader_path, so it must be here.
+    for f in ${logosPackageManagerRoot}/lib/libpackage_manager_lib* \
+             ${logosPackageManagerRoot}/lib/liblgx.so* \
+             ${logosPackageManagerRoot}/lib/liblgx.dylib; do
       if [ -f "$f" ]; then
         cp -L "$f" $out/lib/
       fi
     done
+
+    # The shared C++ runtime, which liblogos_core now IMPORTS instead of
+    # absorbing. This is NOT optional packaging: liblogos_core records
+    # @rpath/liblogos_qt_host.dylib and @rpath/liblogos_protocol.dylib, and its
+    # only LC_RPATH is @loader_path -- so the loader looks for them BESIDE
+    # itself, i.e. in this directory, and nowhere else.
+    #
+    # Measured before this existed: the build succeeded, `logos_host --help`
+    # exited 0, and dlopen of the library failed outright with
+    #   Library not loaded: @rpath/liblogos_qt_host.dylib
+    # A help-text smoke test does not touch the library, so nothing in the build
+    # or in a boot check would have caught it.
+    #
+    # Explicit `for` + `-f` rather than a glob array, for the reason spelled out
+    # in the Windows block below: a fully interpolated literal path survives into
+    # an array even under nullglob, so a guard over it passes vacuously.
+    for f in ${logosProtocolRoot}/lib/liblogos_protocol.so* \
+             ${logosProtocolRoot}/lib/liblogos_protocol.dylib \
+             ${logosProtocolRoot}/bin/liblogos_protocol.dll \
+             ${logosQtHostRoot}/lib/liblogos_qt_host.so* \
+             ${logosQtHostRoot}/lib/liblogos_qt_host.dylib \
+             ${logosQtHostRoot}/bin/liblogos_qt_host.dll; do
+      if [ -f "$f" ]; then
+        cp -L "$f" $out/lib/
+      fi
+    done
+
+    # Assert it, rather than trusting the copy above. The failure mode is a
+    # library that builds and installs and cannot be loaded.
+    _shared_found=0
+    for f in $out/lib/liblogos_protocol.* $out/lib/liblogos_qt_host.*; do
+      [ -f "$f" ] && _shared_found=$((_shared_found + 1))
+    done
+    if [ "$_shared_found" -lt 2 ]; then
+      echo "ERROR: liblogos_core imports the shared runtime, but only $_shared_found" >&2
+      echo "       of liblogos_protocol / liblogos_qt_host were staged into \$out/lib." >&2
+      echo "       liblogos_core resolves them through @loader_path and will fail to load." >&2
+      exit 1
+    fi
 
     ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isWindows ''
       # Windows only: libpackage_manager_lib's OWN dependency, liblgx.

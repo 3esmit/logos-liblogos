@@ -1,0 +1,12 @@
+{
+  "name": "dep_malformed_fixture",
+  "display_name": "Malformed Constraint Fixture",
+  "version": "1.0.0",
+  "description": "Test fixture whose embedded metadata declares a bare-name dependency alongside one whose version constraint is not a string",
+  "author": "Logos Core Team",
+  "type": "core",
+  "dependencies": [
+    "plain_probe_dep",
+    { "name": "malformed_probe_dep", "version": 2 }
+  ]
+}

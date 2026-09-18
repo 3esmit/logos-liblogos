@@ -1,7 +1,9 @@
 #ifndef MODULE_REGISTRY_H
 #define MODULE_REGISTRY_H
 
+#include "dependency_gate.h"
 #include "module_loader.h"
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -28,17 +30,42 @@ struct ModuleInfo {
     // at discovery time via ModuleLib::LogosModule (no plugin instantiation).
     // Empty when the plugin exposes no readable metadata.
     std::string metadataJson;
-    std::vector<std::string> dependencies;
+    // The module's own version, from that embedded metadata. Empty when the
+    // plugin carries no version stamp; a dependent's range is evaluated
+    // against it.
+    std::string version;
+    // Declared dependency edges with whatever constraints each entry carried
+    // (a bare-name entry constrains nothing). Every graph consumer uses the
+    // name-only view from moduleDependencies().
+    std::vector<LogosCore::ModuleDependency> dependencies;
     // Direct reverse edges — names of modules whose `dependencies` list
     // includes this module. Kept in sync with `dependencies` across every
     // graph mutation by ModuleRegistry itself; callers never populate it
     // directly. Use ModuleRegistry::moduleDependents() for transitive walks.
     std::vector<std::string> dependents;
+    // The SECOND edge set (metadata.json#optional_dependencies): concrete
+    // modules this one can call but does not require. Carries the same
+    // constraints as `dependencies` — an installer resolves both the same way;
+    // only the loader differs.
+    //
+    // Deliberately NOT merged into `dependencies`: the load closure, the
+    // teardown cascade and the missing-dependency verdict all read that one,
+    // and every one of them must ignore this one.
+    std::vector<LogosCore::ModuleDependency> optionalDependencies;
+    std::vector<std::string> optionalDependents;
     bool loaded = false;
     // Unix timestamp (seconds) of the most recent load, set by markLoaded and
     // cleared to 0 by markUnloaded. 0 ⟺ not currently loaded. Callers derive a
     // module's uptime from it (now - loadedAt), valid only while loaded.
     int64_t loadedAt = 0;
+    // Readiness: has the module published its object? Tracked only while a
+    // watch is armed, so nullopt means UNKNOWN, not "not ready".
+    std::optional<bool> published;
+    int64_t publishedAt = 0;
+    // Bumped by every markLoaded. A readiness callback carries the epoch it was
+    // armed under, so a fast unload/reload cannot let a stale watch mark the new
+    // instance ready. Not loadedAt: that is whole seconds and collides.
+    uint64_t loadEpoch = 0;
     // Null when loaded directly via markLoaded(name) (test/external scenarios).
     std::shared_ptr<LogosCore::ModuleLoader> loader;
     LogosCore::LoadedModuleHandle handle;
@@ -79,16 +106,36 @@ public:
     // names yield an empty list. Traversal is cycle- and diamond-safe.
     std::vector<std::string> moduleDependencies(const std::string& name,
                                                 bool recursive = false) const;
+    // The same direct edges, carrying the constraints they declared. Feeds the
+    // dependency gate; unknown names yield an empty list.
+    std::vector<LogosCore::ModuleDependency>
+    moduleDependencyEntries(const std::string& name) const;
+    // A module's own version, or "" when it is unknown or carries no stamp.
+    std::string moduleVersion(const std::string& name) const;
     // Reverse-edge accessor. `recursive=false` returns the direct
     // dependents stored on ModuleInfo. `recursive=true` walks the reverse
     // graph breadth-first and returns every transitive dependent. Unknown
     // names yield an empty list.
     std::vector<std::string> moduleDependents(const std::string& name,
                                               bool recursive = false) const;
+    // The optional edge set. Direct only, in both directions: an optional edge
+    // says nothing about what lies beyond it, so a transitive walk mixing the
+    // two would answer a question nothing asks.
+    std::vector<std::string> moduleOptionalDependencies(const std::string& name) const;
+    std::vector<LogosCore::ModuleDependency>
+    moduleOptionalDependencyEntries(const std::string& name) const;
+    std::vector<std::string> moduleOptionalDependents(const std::string& name) const;
     std::vector<std::string> knownModuleNames() const;
     void registerModule(const std::string& name, const std::string& path,
                         const std::vector<std::string>& dependencies = {});
     void registerDependencies(const std::string& name, const std::vector<std::string>& dependencies);
+    // Constraint-carrying overload, and the version a dependent's range is
+    // checked against. Direct graph mutators alongside registerModule.
+    void registerDependencies(const std::string& name,
+                              const std::vector<LogosCore::ModuleDependency>& dependencies);
+    void registerOptionalDependencies(const std::string& name,
+                                      const std::vector<std::string>& optionalDependencies);
+    void registerModuleVersion(const std::string& name, const std::string& version);
 
     bool isLoaded(const std::string& name) const;
     void markLoaded(const std::string& name);
@@ -102,6 +149,14 @@ public:
     void markUnloaded(const std::string& name);
     std::vector<std::string> loadedModuleNames() const;
     void clearLoaded();
+
+    // Readiness. beginPublishWatch flips `published` from unknown to false;
+    // markPublished sets it true, but only if `epoch` still matches the current
+    // load (a stale watch from a previous load is dropped). Returns whether it
+    // applied. loadEpoch() reads the value to arm a watch with.
+    void beginPublishWatch(const std::string& name);
+    bool markPublished(const std::string& name, uint64_t epoch);
+    uint64_t loadEpoch(const std::string& name) const;
 
     // Returns the loader that owns the named loaded module, or nullptr if
     // loaded without a loader association (e.g. via markLoaded(name) only).

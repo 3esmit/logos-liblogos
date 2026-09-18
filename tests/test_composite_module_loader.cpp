@@ -113,6 +113,14 @@ struct FakeContainer : public InstanceAwareModuleContainer {
         return pids;
     }
 
+    LoadOutcome awaitLoadInstance(const ModuleAddress& address,
+                                  std::chrono::milliseconds) override {
+        instanceAwaitCalls.push_back(address);
+        return activeInstances.count(address) > 0
+            ? LoadOutcome{LoadVerdict::Loaded, {}}
+            : LoadOutcome{LoadVerdict::Failed, "not running"};
+    }
+
     struct LaunchRecord {
         std::string name;
         std::string hostBinary;
@@ -136,6 +144,7 @@ struct FakeContainer : public InstanceAwareModuleContainer {
     std::vector<std::string> terminateCalls;
     std::vector<InstanceLaunchRecord> instanceLaunchCalls;
     std::vector<std::pair<ModuleAddress, std::string>> instanceTokenCalls;
+    std::vector<ModuleAddress> instanceAwaitCalls;
     std::vector<ModuleAddress> instanceTerminateCalls;
     std::unordered_set<std::string> activeModules;
     std::unordered_set<ModuleAddress, ModuleAddressHash> activeInstances;
@@ -265,6 +274,12 @@ TEST_F(CompositeModuleLoaderTest, LoadInstance_DelegatesFullAddressToInstanceAwa
     EXPECT_EQ(handle.address(), desc.address());
     EXPECT_TRUE(composite->hasInstance(desc.address()));
     EXPECT_EQ(composite->instancePid(desc.address()), std::optional<int64_t>{43});
+
+    const auto verdict = composite->awaitLoadInstance(
+        desc.address(), std::chrono::milliseconds{1});
+    EXPECT_EQ(verdict.verdict, LoadVerdict::Loaded);
+    ASSERT_EQ(container->instanceAwaitCalls.size(), 1u);
+    EXPECT_EQ(container->instanceAwaitCalls.front(), desc.address());
 
     EXPECT_TRUE(composite->sendTokenToInstance(desc.address(), "scoped-token"));
     ASSERT_EQ(container->instanceTokenCalls.size(), 1u);

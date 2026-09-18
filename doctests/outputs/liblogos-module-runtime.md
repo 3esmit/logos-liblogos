@@ -9,18 +9,18 @@ end-to-end through the headless `logoscore` runtime:
    commit under test** — so the runtime you exercise is built against the code
    in this repository, not the latest published release.
 2. Build the `lgpm` local package manager.
-3. Build the real [`accounts_module`](https://github.com/logos-co/logos-accounts-module)
+3. Build [`test_basic_module`](https://github.com/logos-co/logos-test-modules)
    as an `.lgx` package straight from its own flake, and install it into a
    `./modules` directory with `lgpm`.
-4. Start `logoscore` in daemon mode (`-D`), load `accounts_module`, introspect
-   it, and call one of its methods — verifying the module actually runs on top
+4. Start `logoscore` in daemon mode (`-D`), load `test_basic_module`, introspect
+   it, and call two of its methods — verifying the module actually runs on top
    of this liblogos.
 
 Because every layer (host, module loader, IPC) comes from the liblogos commit
 under test, a green run is real evidence that this change keeps the module
 runtime working.
 
-**What you'll build:** The real `accounts_module`, installed with `lgpm` and called through a `logoscore` daemon running on this liblogos commit.
+**What you'll build:** A real module — `test_basic_module` — installed with `lgpm` and called through a `logoscore` daemon running on this liblogos commit.
 
 **What you'll learn:**
 
@@ -40,7 +40,6 @@ echo 'experimental-features = nix-command flakes' >> ~/.config/nix/nix.conf
 
 Verify: `nix flake --help >/dev/null 2>&1 && echo "Flakes enabled"`
 
-- **git** — to clone the module repository.
 - A Linux or macOS machine.
 
 ---
@@ -57,10 +56,17 @@ than the latest release. The result is symlinked to `./logos/`.
 > the repository under test, then pins its commit. With no pin it falls back
 > to that repository's latest default branch.
 
+> The CLI itself tracks `master`, deliberately. Only `logos-liblogos` is
+> overridden, so everything else in the closure must be a revision that
+> liblogos' current runtime pairs with — the shared-runtime split landed as
+> one pin set across logos-protocol, logos-plugin-qt, logos-liblogos and
+> this CLI, and an older CLI rev pinned here silently reintroduces a second
+> copy of the runtime in the process.
+
 ### 1.1 Build the CLI with the liblogos override
 
 ```bash
-nix build 'github:logos-co/logos-logoscore-cli/b92ade06cdbd3cdf48c8de5b8375cbcc3a6088cf' \
+nix build 'github:logos-co/logos-logoscore-cli' \
   --override-input logos-liblogos 'github:logos-co/logos-liblogos' \
   --out-link ./logos
 ```
@@ -90,44 +96,37 @@ The executable is at `./lgpm/bin/lgpm`.
 
 ---
 
-## Step 3: Build and install the accounts module
+## Step 3: Build and install a module
 
-Clone [`logos-accounts-module`](https://github.com/logos-co/logos-accounts-module),
-build its `.lgx` straight from its flake's `#lgx` output, and install it
-into a local `./modules` directory with `lgpm`. Every module built with
+Build [`test_basic_module`](https://github.com/logos-co/logos-test-modules)'s
+`.lgx` straight from its flake and install it into a local `./modules`
+directory with `lgpm`. Every module built with
 [`logos-module-builder`](https://github.com/logos-co/logos-module-builder)
-exposes a ready-to-install `#lgx`.
+exposes a ready-to-install `lgx` output.
 
-### 3.1 Clone the module
+### 3.1 Build the module's .lgx
 
-We clone over HTTPS so the step works in CI; over SSH the URL is
-`git@github.com:logos-co/logos-accounts-module.git`.
-
-```bash
-git clone --depth 1 https://github.com/logos-co/logos-accounts-module.git
-```
-
-### 3.2 Build the module's .lgx
-
-Build the `#lgx` output and link it as `./accounts-lgx`. (This compiles
-the module and its SDK dependencies through Nix, so the first build is
-slow.)
+`logos-test-modules` publishes each of its modules under
+`modules.<system>.<name>`, so the attribute path carries the Nix system
+double — `builtins.currentSystem` supplies it. Link the result as
+`./module-lgx`.
 
 ```bash
-# From inside the clone this is simply: nix build '.#lgx'
-nix build 'path:./logos-accounts-module#lgx' -o accounts-lgx
+# From inside a single-module repo this is simply: nix build '.#lgx'
+SYSTEM=$(nix eval --impure --raw --expr 'builtins.currentSystem')
+nix build "github:logos-co/logos-test-modules#modules.$SYSTEM.test_basic_module.lgx" -o module-lgx
 ```
 
-The `.lgx` package is now under `./accounts-lgx/`:
+The `.lgx` package is now under `./module-lgx/`:
 
 ```bash
-ls accounts-lgx/*.lgx
+ls module-lgx/*.lgx
 ```
 
-### 3.3 Seed the modules directory with the bundled capability module
+### 3.2 Seed the modules directory with the bundled capability module
 
-`accounts_module` is loaded through the host's capability layer, so the
-modules directory also needs the `capability_module` that ships with
+Modules are loaded through the host's capability layer, so the modules
+directory also needs the `capability_module` that ships with
 `logoscore`. Copy it across first.
 
 ```bash
@@ -136,17 +135,17 @@ cp -RL ./logos/modules/. ./modules/
 
 ```
 
-### 3.4 Install the .lgx with lgpm
+### 3.3 Install the .lgx with lgpm
 
-Install the freshly-built package into `./modules`. `accounts_module` is
-a `core` module, so it goes to `--modules-dir`. The package is unsigned
-(a local dev build), so we pass `--allow-unsigned`.
+Install the freshly-built package into `./modules`. `test_basic_module`
+is a `core` module, so it goes to `--modules-dir`. The package is
+unsigned (a local dev build), so we pass `--allow-unsigned`.
 
 ```bash
-./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file accounts-lgx/*.lgx
+./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file module-lgx/*.lgx
 ```
 
-### 3.5 Confirm the install
+### 3.4 Confirm the install
 
 Scan the directory and confirm the module landed:
 
@@ -159,7 +158,7 @@ Scan the directory and confirm the module landed:
 ## Step 4: Run the daemon and call the module
 
 Start `logoscore` in daemon mode pointed at `./modules`, then use the client
-subcommands to load `accounts_module`, introspect it, and call one of its
+subcommands to load `test_basic_module`, introspect it, and call two of its
 methods. Daemon output is captured in `logs.txt`.
 
 ### 4.1 Start the daemon
@@ -196,7 +195,7 @@ logoscore status
 
 ### 4.4 List discovered modules
 
-`accounts_module` should be visible in the scan directory:
+`test_basic_module` should be visible in the scan directory:
 
 ```bash
 logoscore list-modules
@@ -204,10 +203,10 @@ logoscore list-modules
 
 ### 4.5 Load the module
 
-Load `accounts_module` into the running daemon:
+Load `test_basic_module` into the running daemon:
 
 ```bash
-logoscore load-module accounts_module
+logoscore load-module test_basic_module
 ```
 
 ### 4.6 Confirm the module is loaded
@@ -221,32 +220,29 @@ logoscore status
 
 ### 4.7 Introspect the module with module-info
 
-`module-info` lists the `Q_INVOKABLE` methods the module exposes — the
+`module-info` lists the methods and events the module exposes — the
 same methods you can `call`:
 
 ```bash
-logoscore module-info accounts_module
+logoscore module-info test_basic_module
 ```
 
 ### 4.8 Call a method
 
-Generate a fresh 12-word BIP-39 mnemonic. `createRandomMnemonic` takes
-the word count and returns the phrase — a real round-trip through the
-go-wallet-sdk C library wrapped by the module, dispatched over liblogos'
-IPC:
+`echo` returns its argument unchanged — a string round-trip out to the
+module subprocess and back over liblogos' IPC:
 
 ```bash
-logoscore call accounts_module createRandomMnemonic 12
+logoscore call test_basic_module echo hello
 ```
 
 ### 4.9 Call a second method
 
-`lengthToEntropyStrength` maps a mnemonic word count to its entropy
-strength in bits — 12 words is 128 bits. This exercises an `int`
-round-trip:
+`addInts` adds its two arguments. This exercises an `int` round-trip,
+where `echo` exercised a string:
 
 ```bash
-logoscore call accounts_module lengthToEntropyStrength 12
+logoscore call test_basic_module addInts 40 2
 ```
 
 ### 4.10 Stop the daemon

@@ -1,0 +1,120 @@
+name: "Asking the Host Whether a Module Actually Loaded"
+output: liblogos-host-verdict.md
+release: ""
+
+intro: |
+  `logos_core_load_module` used to answer "loaded" as soon as the OS had made a
+  process. Spawning a host and loading the plugin inside it are two different
+  facts, and collapsing them is how a module whose plugin never loaded got
+  reported as loaded, with the real failure surfacing hops away in a consumer.
+
+  The fix gave the host a line to say which: it prints
+  `@logos-load-status ok`, or `@logos-load-status failed <reason>`, and the
+  daemon waits for it. This doc-test exercises that line directly — no daemon,
+  no frontend, just the host binary this repository builds and a real plugin it
+  ships — so it runs unchanged on Linux, macOS **and Windows**.
+
+what_you_build: "A module host, handed a real plugin, reporting its own verdict."
+
+what_you_learn:
+  - What `logos_host_qt` prints once a plugin has loaded, and where
+  - How the host takes its auth token on stdin rather than from a socket
+  - That the same check runs on Windows, where the plugin is a `.dll`
+
+prerequisites:
+  - |
+    **Nix** with flakes enabled — needed only to build the host. The run half
+    needs nothing but the built tree, which is why it also runs on a Windows
+    machine that has no nix at all.
+
+sections:
+  - title: "Build the module host"
+    step: true
+    # nix exists only on the build machine. Everything below drives the tree
+    # this section produces, so it is left unmarked and runs anywhere --
+    # including a real Windows runner, which is the point of marking this one.
+    platform: [linux, macos]
+    text: |
+      `logos-liblogos-bin` is the runtime half of this repository: the
+      `logos_host` / `logos_host_qt` binaries, and the modules bundled beside
+      them. Naming the output link after the attribute matters — a Windows run
+      finds the same tree already staged under that name, so every path below
+      is written once.
+    steps:
+      - title: "Build it"
+        run: 'nix build "github:logos-co/logos-liblogos{release}#logos-liblogos-bin" -o logos-liblogos-bin'
+        code_block: "nix build 'github:logos-co/logos-liblogos#logos-liblogos-bin'"
+        check_file: "logos-liblogos-bin/bin/logos_host_qt{exe}"
+
+  - title: "Confirm the host has a plugin to load"
+    step: true
+    platform: [linux, macos, windows]
+    text: |
+      The bundled modules are real installed packages, not loose libraries: a
+      `manifest.json`, a `variant` marker, and the plugin binary. `modules_state`
+      is the one used below — it is small, it has no dependencies of its own, and
+      it publishes a normal module object, so a successful load is a full load
+      rather than a special case.
+    steps:
+      - title: "List what ships beside the host"
+        run: "ls logos-liblogos-bin/modules/modules_state"
+        code_block: "ls logos-liblogos-bin/modules/modules_state"
+        # Containment, deliberately: extra files beside the plugin must not
+        # break this, only a missing plugin should.
+        expect_contains:
+          - "modules_state_plugin"
+          - "manifest.json"
+
+  - title: "The host reports its own verdict"
+    step: true
+    platform: [linux, macos, windows]
+    text: |
+      Run the host directly, the way the daemon runs it: name the module, point
+      at the plugin, and hand the auth token over stdin. The host stays alive
+      once it is up — a module host is a server — so this reads its log until
+      the status line appears and then stops it, rather than waiting for an exit
+      that is not coming.
+
+      `@logos-load-status ok` is the whole assertion. It means the plugin was
+      loaded inside the host process, which is the fact the daemon now waits for
+      before it tells anyone a module is loaded.
+    steps:
+      - title: "Hand it a real plugin and read the verdict"
+        run: |
+          printf '00000000-0000-0000-0000-000000000000\n' > token.txt
+          # Relative is fine: the host resolves --path against the working
+          # directory. It did not always -- a relative path used to come back as
+          # "the shared library was not found", which reads as a missing
+          # dependency of a plugin that was found rather than as a path nobody
+          # resolved. cygpath stays, for its own separate reason: git-bash hands
+          # a POSIX path to a NATIVE exe, and cygpath -- present there and
+          # nowhere else -- is what puts it in Windows form.
+          plugin="logos-liblogos-bin/modules/modules_state/modules_state_plugin.{ext}"
+          if command -v cygpath >/dev/null 2>&1; then plugin=$(cygpath -w "$plugin"); fi
+          ./logos-liblogos-bin/bin/logos_host_qt{exe} \
+            --name modules_state \
+            --path "$plugin" \
+            --token-source stdin < token.txt > host.log 2>&1 &
+          host=$!
+          # `if`, not `grep -q ... && break`: under `set -e` a failing grep in an
+          # && list takes the whole script down on the first iteration, before
+          # the host has had time to say anything.
+          for _ in $(seq 1 60); do
+            if grep -q '@logos-load-status' host.log 2>/dev/null; then break; fi
+            sleep 1
+          done
+          kill "$host" 2>/dev/null || true
+          cat host.log
+        code_block: |
+          printf '<token>\n' > token.txt
+          ./logos-liblogos-bin/bin/logos_host_qt \
+            --name modules_state \
+            --path logos-liblogos-bin/modules/modules_state/modules_state_plugin.dylib \
+            --token-source stdin < token.txt
+        expect_contains:
+          - "@logos-load-status ok"
+        post_text: |
+          A plugin that fails to load answers on the same line —
+          `@logos-load-status failed <reason>` — and that reason is what the
+          daemon reports to its caller and onto the `modules_state` feed, instead
+          of the success it used to invent.

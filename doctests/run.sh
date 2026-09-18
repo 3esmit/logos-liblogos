@@ -5,10 +5,10 @@
 # Two specs run, each exercising THIS liblogos commit a different way:
 #   - liblogos-module-runtime.test.yaml — drives liblogos through the headless
 #     `logoscore` CLI frontend (build logoscore against this liblogos, install
-#     the accounts module, start the daemon, call methods).
+#     test_basic_module, start the daemon, call methods).
 #   - liblogos-as-a-library.test.yaml — embeds liblogos directly: builds
 #     liblogos_core from this commit, compiles a small C++ program that links it,
-#     installs modules with lgpm, and loads the accounts module through the C API.
+#     installs modules with lgpm, and loads test_basic_module through the C API.
 #
 # The runner is the shared `doctest` CLI
 # (https://github.com/logos-co/logos-doctest), invoked directly via its flake.
