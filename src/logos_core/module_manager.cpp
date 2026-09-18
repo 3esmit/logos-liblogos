@@ -39,6 +39,7 @@
 #include "logos_transport_config_json.h"
 #include "token_manager.h"
 #include "instance_persistence.h"
+#include "scoped_token_key.h"
 
 namespace {
     ModuleRegistry& registryInstance() {
@@ -1089,7 +1090,7 @@ namespace {
 
         const std::string tokenKey = address.isDefaultInstance()
             ? name
-            : logos::scopedModuleTokenKey(
+            : LogosCore::scopedInstanceTokenKey(
                   QString::fromStdString(address.moduleName),
                   QString::fromStdString(address.instanceId)).toStdString();
         TokenManager::instance().saveToken(tokenKey, authToken);

@@ -19,6 +19,7 @@
 #include "subprocess_manager.h"
 #include "logos_api_client.h"
 #include "token_manager.h"
+#include "scoped_token_key.h"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -340,10 +341,10 @@ TEST_F(ModuleLoaderAbstractionTest,
     EXPECT_EQ(fake->instanceTokenCalls[0].first, alpha);
     EXPECT_EQ(fake->instanceTokenCalls[1].first, beta);
     EXPECT_NE(fake->instanceTokenCalls[0].second, fake->instanceTokenCalls[1].second);
-    const std::string alphaTokenKey = logos::scopedModuleTokenKey(
+    const std::string alphaTokenKey = LogosCore::scopedInstanceTokenKey(
         QString::fromStdString(alpha.moduleName),
         QString::fromStdString(alpha.instanceId)).toStdString();
-    const std::string betaTokenKey = logos::scopedModuleTokenKey(
+    const std::string betaTokenKey = LogosCore::scopedInstanceTokenKey(
         QString::fromStdString(beta.moduleName),
         QString::fromStdString(beta.instanceId)).toStdString();
     EXPECT_EQ(TokenManager::instance().getToken(alphaTokenKey),
