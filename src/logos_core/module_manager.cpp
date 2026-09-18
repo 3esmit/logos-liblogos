@@ -135,13 +135,23 @@ namespace {
         return *slot;
     }
 
-    // Per-module transport set, keyed by module name. Set by the
-    // daemon before the corresponding module loads (capability_module
-    // before logos_core_start; user modules before loadModule). Empty
-    // = inherit the global default. See module_manager.h for details.
+    LogosCore::ModuleAddress defaultAddress(const std::string& moduleName) {
+        return {moduleName, {}};
+    }
+
+    std::string addressLabel(const LogosCore::ModuleAddress& address) {
+        return address.isDefaultInstance()
+            ? address.moduleName
+            : address.moduleName + "@" + address.instanceId;
+    }
+
+    // Per-runtime transport set. The default address retains the historical
+    // name-only behavior; explicit addresses never overwrite siblings.
     // Guarded by configMutex().
-    std::unordered_map<std::string, std::string>& moduleTransportsMap() {
-        static std::unordered_map<std::string, std::string> m;
+    std::unordered_map<LogosCore::ModuleAddress, std::string,
+                       LogosCore::ModuleAddressHash>& moduleTransportsMap() {
+        static std::unordered_map<LogosCore::ModuleAddress, std::string,
+                                  LogosCore::ModuleAddressHash> m;
         return m;
     }
 
@@ -374,7 +384,7 @@ namespace {
         std::string transportSetJson;
         {
             std::shared_lock<std::shared_mutex> g(configMutex());
-            if (auto it = moduleTransportsMap().find(name);
+            if (auto it = moduleTransportsMap().find(defaultAddress(name));
                 it != moduleTransportsMap().end())
                 transportSetJson = it->second;
         }
@@ -513,16 +523,34 @@ namespace {
         // On the owner thread, which the 3-arg informModuleToken needs for a
         // second reason: it has no marshal of its own at the pinned protocol,
         // and a QtRO replica is thread-AFFINE, not merely non-reentrant.
-        runOnOwner([name, token]() {
+        runOnOwner([address, token]() {
             const std::string capabilityModuleToken =
                 TokenManager::instance().getToken(std::string("capability_module"));
 
             // INBOUND half of load-time identity: capability stores (name, token)
             // so authorize can name the caller from the presented token rather
             // than from a self-asserted fromModuleName.
-            if (!capabilityModuleClient()->informModuleToken(
-                    capabilityModuleToken, name, token)) {
-                spdlog::warn("Failed to register token with capability module for: {}", name);
+            if (address.isDefaultInstance()) {
+                if (!capabilityModuleClient()->informModuleToken(
+                        capabilityModuleToken, address.moduleName, token)) {
+                    spdlog::warn("Failed to register token with capability module for: {}",
+                                 address.moduleName);
+                }
+                return;
+            }
+
+            nlohmann::json args = nlohmann::json::array();
+            args.push_back(capabilityModuleToken);
+            args.push_back(address.moduleName);
+            args.push_back(address.instanceId);
+            args.push_back(token);
+            const nlohmann::json result = capabilityModuleClient()->invokeRemoteMethod(
+                std::string("capability_module"),
+                std::string("informModuleTokenScoped"),
+                args);
+            if (!result.is_boolean() || !result.get<bool>()) {
+                spdlog::warn("Failed to register token with capability module for: {}",
+                             addressLabel(address));
             }
         });
     }
@@ -736,8 +764,13 @@ namespace {
 
     // Callers hold fleetMutex(). Takes `name`'s own lock, so two callers of one
     // module are one load and two callers of different modules are two.
-    bool loadModuleInternal(const char* moduleName) {
-        std::string name(moduleName);
+    bool loadModuleInternal(const LogosCore::ModuleAddress& address) {
+        if (!address.isValid()) {
+            spdlog::warn("Cannot load module with invalid runtime address: {}",
+                         addressLabel(address));
+            return false;
+        }
+        const std::string& name = address.moduleName;
 
         if (!registryInstance().isKnown(name)) {
             spdlog::warn("Cannot load unknown module: {}", name);
@@ -794,8 +827,12 @@ namespace {
                 return false;
             }
             desc.instancePersistencePath = info.persistencePath;
-            if (!info.instanceId.empty())
+            if (!address.isDefaultInstance() && !address.instanceId.empty())
+                instanceId = address.instanceId;
+            else if (!info.instanceId.empty())
                 instanceId = info.instanceId;
+        } else if (!address.isDefaultInstance()) {
+            instanceId = address.instanceId;
         }
 
         // The attempt starts here — everything above was a cheap reject that
@@ -813,7 +850,7 @@ namespace {
         // listeners. Modules without an entry inherit the global default.
         {
             std::shared_lock<std::shared_mutex> g(configMutex());
-            if (auto it = moduleTransportsMap().find(name);
+            if (auto it = moduleTransportsMap().find(address);
                 it != moduleTransportsMap().end()) {
                 desc.transportSetJson = it->second;
             }
@@ -883,10 +920,29 @@ namespace {
 
         auto loader = loaderRegistry().select(desc);
         if (!loader) {
-            spdlog::warn("No loader available to load module: {}", name);
+            spdlog::warn("No loader available to load module runtime: {}",
+                         addressLabel(address));
             logos::ModuleStateObserver::instance().record(
                 name, logos::module_state::kLoading, logos::module_state::kError,
                 instanceId, std::nullopt, "no loader available for this module format");
+            return false;
+        }
+
+        const auto instanceLoader = address.isDefaultInstance()
+            ? std::shared_ptr<LogosCore::InstanceAwareModuleLoader>{}
+            : std::dynamic_pointer_cast<LogosCore::InstanceAwareModuleLoader>(loader);
+        if (!address.isDefaultInstance() && !instanceLoader) {
+            spdlog::warn("Selected loader cannot host explicit module runtime: {}",
+                         addressLabel(address));
+            logos::ModuleStateObserver::instance().record(
+                name, logos::module_state::kLoading, logos::module_state::kError,
+                instanceId, std::nullopt, "loader does not support explicit module instances");
+            return false;
+        }
+
+        const std::optional<uint64_t> generation = registryInstance().reserveRuntime(address);
+        if (!generation) {
+            spdlog::warn("Cannot reserve duplicate module runtime: {}", addressLabel(address));
             return false;
         }
 
@@ -897,12 +953,14 @@ namespace {
         // This is the one seam that flushes inline: it is not under
         // a load lock, so there is no lock to get out from under, and a crash
         // is the transition a consumer most needs promptly.
-        auto onTerminated = [](const std::string& n) {
+        auto onTerminated = [address, generation = *generation](const std::string& n) {
             // Marks the module unloaded and, if a load is in flight, hands the
             // termination to it: that load reports the failure, with the child's
             // own reason, and its markLoaded is called off.
             if (recordTerminationDuringLoad(n))
                 return;
+
+            registryInstance().markRuntimeUnloadedIfGeneration(address, generation);
 
             auto& observer = logos::ModuleStateObserver::instance();
             if (consumeExpectedExit(n)) {
@@ -916,6 +974,17 @@ namespace {
             observer.flush();
         };
 
+        auto onInstanceTerminated = [address, generation = *generation](
+            const LogosCore::ModuleAddress& terminated) {
+            if (terminated != address) return;
+            registryInstance().markRuntimeUnloadedIfGeneration(address, generation);
+            auto& observer = logos::ModuleStateObserver::instance();
+            observer.record(address.moduleName, logos::module_state::kLoaded,
+                            logos::module_state::kError, address.instanceId,
+                            std::nullopt, "module exited without being asked to");
+            observer.flush();
+        };
+
         // Past here a child process may exist, so a termination belongs to this
         // attempt rather than to whatever the module was doing before.
         beginLoadAttempt(name);
@@ -924,10 +993,14 @@ namespace {
         bool started;
         {
             std::lock_guard<std::mutex> g(spawnMutex());
-            started = loader->load(desc, onTerminated, handle);
+            if (address.isDefaultInstance())
+                started = loader->load(desc, onTerminated, handle);
+            else
+                started = instanceLoader->loadInstance(desc, onInstanceTerminated, handle);
         }
         if (!started) {
             abandonLoadAttempt(name);
+            registryInstance().cancelRuntime(address, *generation);
             logos::ModuleStateObserver::instance().record(
                 name, logos::module_state::kLoading, logos::module_state::kError,
                 instanceId, std::nullopt, "loader failed to start the module");
@@ -942,12 +1015,18 @@ namespace {
         // the child, and register it locally under the module's name.
         std::string authToken = boost::uuids::to_string(boost::uuids::random_generator()());
 
-        if (!loader->sendToken(name, authToken)) {
+        const bool tokenDelivered = address.isDefaultInstance()
+            ? loader->sendToken(name, authToken)
+            : instanceLoader->sendTokenToInstance(address, authToken);
+        if (!tokenDelivered) {
             // We are about to terminate it deliberately, so announce the intent
             // BEFORE calling terminate() — otherwise onTerminated, which may
             // already be running on the asio thread, reports this as a crash.
             markExitExpected(name);
-            loader->terminate(name);
+            if (address.isDefaultInstance())
+                loader->terminate(name);
+            else
+                instanceLoader->terminateInstance(address);
             // Same reason unloadModuleInternal() consumes below: the
             // container drops the callback for a teardown it performed, so this
             // mark has nothing left to consume it. Before the attempt is
@@ -955,6 +1034,7 @@ namespace {
             // this load stays the only thing that reports.
             consumeExpectedExit(name);
             abandonLoadAttempt(name);
+            registryInstance().cancelRuntime(address, *generation);
             logos::ModuleStateObserver::instance().record(
                 name, logos::module_state::kLoading, logos::module_state::kError,
                 instanceId, pid, "failed to deliver the module's auth token");
@@ -973,8 +1053,12 @@ namespace {
 
         if (outcome.verdict == LogosCore::LoadVerdict::Failed) {
             spdlog::error("Failed to load module {}: {}", name, outcome.reason);
-            loader->terminate(name);   // no-op when the child is already gone
+            if (address.isDefaultInstance())
+                loader->terminate(name);   // no-op when the child is already gone
+            else
+                instanceLoader->terminateInstance(address);
             abandonLoadAttempt(name);
+            registryInstance().cancelRuntime(address, *generation);
             logos::ModuleStateObserver::instance().record(
                 name, logos::module_state::kLoading, logos::module_state::kError,
                 instanceId, pid, outcome.reason);
@@ -991,7 +1075,10 @@ namespace {
 
         // Settles a death that arrived while we waited together with the
         // registry write — see commitLoad.
-        if (!commitLoad(name, loader, std::move(handle))) {
+        const bool committed = address.isDefaultInstance()
+            ? commitLoad(name, loader, std::move(handle))
+            : registryInstance().completeRuntime(address, *generation, loader, std::move(handle));
+        if (!committed) {
             const char* reason = "the module process exited while it was loading";
             spdlog::error("Failed to load module {}: {}", name, reason);
             logos::ModuleStateObserver::instance().record(
@@ -1018,7 +1105,7 @@ namespace {
 
         refreshDerivedRestrictionsForDependenciesOf(name);
 
-        spdlog::info("Module loaded: {}", name);
+        spdlog::info("Module loaded: {}", addressLabel(address));
         logos::ModuleStateObserver::instance().record(
             name, logos::module_state::kLoading, logos::module_state::kLoaded,
             instanceId, pid);
@@ -1032,6 +1119,10 @@ namespace {
         armReadinessWatch(name, instanceId, pid);
 
         return true;
+    }
+
+    bool loadModuleInternal(const char* moduleName) {
+        return moduleName && loadModuleInternal(defaultAddress(std::string(moduleName)));
     }
 
     // Callers hold fleetMutex(): shared for a single unload, exclusive for the
@@ -1080,23 +1171,7 @@ namespace {
             }
         }
 
-        // Order leaves-first: resolve load-order for the teardown set, then
-        // reverse. Teardown remains best-effort for a malformed graph.
-        const std::vector<std::string> loadOrder = DependencyResolver::resolve(
-            teardownSet,
-            [](const std::string& n) { return registryInstance().isKnown(n); },
-            [](const std::string& n) { return registryInstance().moduleDependencies(n); }
-        ).order;
-        std::vector<std::string> teardownOrder;
-        std::unordered_set<std::string> teardownOrderMembers;
-        for (auto it = loadOrder.rbegin(); it != loadOrder.rend(); ++it) {
-            if (teardownSetMembers.count(*it) && teardownOrderMembers.insert(*it).second)
-                teardownOrder.push_back(*it);
-        }
-        for (const std::string& current : teardownSet) {
-            if (teardownOrderMembers.insert(current).second)
-                teardownOrder.push_back(current);
-        }
+        registryInstance().markUnloaded(name);
 
         // markUnloaded keeps the dependency edges, so this still resolves them.
         refreshDerivedRestrictionsForDependenciesOf(name);
@@ -1116,6 +1191,49 @@ namespace {
         }
         if (name == kModulesState)
             disableModulesStateFeed();
+        return true;
+    }
+
+    bool unloadModuleInstanceInternal(const LogosCore::ModuleAddress& address,
+                                      bool withDependents) {
+        if (!address.isValid() || withDependents || address.isDefaultInstance()) {
+            spdlog::warn("Cannot unload explicit module runtime: {}",
+                         addressLabel(address));
+            return false;
+        }
+
+        std::lock_guard<std::mutex> moduleGuard(moduleMutex(addressLabel(address)));
+        if (!registryInstance().isRuntimeLoaded(address)) {
+            spdlog::warn("Cannot unload module runtime (not loaded): {}",
+                         addressLabel(address));
+            return false;
+        }
+
+        const auto loader = registryInstance().loaderForRuntime(address);
+        const auto instanceLoader = loader
+            ? std::dynamic_pointer_cast<LogosCore::InstanceAwareModuleLoader>(loader)
+            : std::shared_ptr<LogosCore::InstanceAwareModuleLoader>{};
+        bool terminated = false;
+        if (instanceLoader && instanceLoader->hasInstance(address)) {
+            terminated = instanceLoader->terminateInstance(address);
+        } else if (!loader) {
+            terminated = loaderRegistry().terminateInstance(address);
+        }
+        if (!terminated) {
+            spdlog::warn("No live module entry found for runtime: {}",
+                         addressLabel(address));
+            return false;
+        }
+
+        registryInstance().markRuntimeUnloaded(address);
+        refreshDerivedRestrictionsForDependenciesOf(address.moduleName);
+        spdlog::info("Module unloaded: {}", addressLabel(address));
+        logos::ModuleStateObserver::instance().record(
+            address.moduleName, logos::module_state::kLoaded,
+            logos::module_state::kStopping, address.instanceId);
+        logos::ModuleStateObserver::instance().record(
+            address.moduleName, logos::module_state::kStopping,
+            logos::module_state::kUnloaded, address.instanceId);
         return true;
     }
 }
@@ -1154,11 +1272,23 @@ namespace ModuleManager {
 
     void setModuleTransports(const std::string& moduleName,
                              const std::string& transportSetJson) {
+        setModuleInstanceTransports(moduleName, {}, transportSetJson);
+    }
+
+    void setModuleInstanceTransports(const std::string& moduleName,
+                                     const std::string& instanceId,
+                                     const std::string& transportSetJson) {
         // Same mutex as loadModuleInternal's read of the map, and
         // moduleClient()'s. Without this, an operator can race with an
         // in-flight load and the child gets garbled JSON (or sees an empty
         // transport set after the operator overwrote what it was about to
         // read).
+        const LogosCore::ModuleAddress address{moduleName, instanceId};
+        if (!address.isValid()) {
+            spdlog::warn("Ignoring transport configuration for invalid runtime address: {}",
+                         addressLabel(address));
+            return;
+        }
         std::unique_lock<std::shared_mutex> g(configMutex());
         if (transportSetJson.empty())
             moduleTransportsMap().erase(address);
@@ -1276,8 +1406,14 @@ namespace ModuleManager {
             spdlog::warn("Cannot resolve dependencies for: {}", name);
             return false;
         }
-        if (!address.isDefaultInstance() && registryInstance().isRuntimeLoaded(address)) {
-            spdlog::warn("Cannot load duplicate module runtime: {}", addressLabel(address));
+
+        bool nameFound = false;
+        for (const auto& r : resolved.order) {
+            if (r == name) { nameFound = true; break; }
+        }
+
+        if (resolved.order.empty() || !nameFound) {
+            spdlog::warn("Cannot resolve dependencies for: {}", name);
             return false;
         }
 
@@ -1301,6 +1437,51 @@ namespace ModuleManager {
             allSucceeded = false;
         }
 
+        return allSucceeded;
+    }
+
+    bool loadModuleInstance(const char* moduleName,
+                            const char* instanceId,
+                            bool withDependencies) {
+        if (!moduleName) return false;
+        const LogosCore::ModuleAddress target{
+            std::string(moduleName), instanceId ? std::string(instanceId) : std::string{}};
+        if (!target.isValid()) {
+            spdlog::warn("Cannot load module with invalid runtime address: {}",
+                         addressLabel(target));
+            return false;
+        }
+
+        logos::ScopedModuleStateFlush stateFlusher;
+        ScopedLoadEntry entry;
+        if (entry.reentrant) return refuseReentrantLoad(addressLabel(target));
+        std::shared_lock<std::shared_mutex> fleet(fleetMutex());
+
+        if (!withDependencies)
+            return loadModuleInternal(target);
+
+        const std::vector<std::string> requested{target.moduleName};
+        const auto resolved = DependencyResolver::resolve(
+            requested,
+            [](const std::string& n) { return registryInstance().isKnown(n); },
+            [](const std::string& n) { return registryInstance().moduleDependencies(n); });
+        if (!resolved.ok()) {
+            spdlog::warn("Cannot resolve dependencies for: {}", addressLabel(target));
+            return false;
+        }
+
+        bool targetFound = false;
+        for (const auto& name : resolved.order) {
+            if (name == target.moduleName) targetFound = true;
+        }
+        if (resolved.order.empty() || !targetFound) return false;
+
+        bool allSucceeded = true;
+        for (const auto& name : resolved.order) {
+            const LogosCore::ModuleAddress address =
+                name == target.moduleName ? target : defaultAddress(name);
+            if (!loadModuleInternal(address)) allSucceeded = false;
+        }
         return allSucceeded;
     }
 
@@ -1374,6 +1555,25 @@ namespace ModuleManager {
         return unloadModuleInternal(std::string(moduleName));
     }
 
+    bool unloadModuleInstance(const char* moduleName,
+                              const char* instanceId,
+                              bool withDependents) {
+        if (!moduleName) return false;
+        const LogosCore::ModuleAddress address{
+            std::string(moduleName), instanceId ? std::string(instanceId) : std::string{}};
+        if (address.isDefaultInstance()) {
+            if (withDependents)
+                return unloadModuleWithDependents(moduleName);
+            return unloadModule(moduleName);
+        }
+
+        logos::ScopedModuleStateFlush stateFlusher;
+        ScopedLoadEntry entry;
+        if (entry.reentrant) return false;
+        std::shared_lock<std::shared_mutex> fleet(fleetMutex());
+        return unloadModuleInstanceInternal(address, withDependents);
+    }
+
     bool unloadModuleWithDependents(const char* moduleName) {
         // BEFORE the lock guard, so it is destroyed after it. See rule 1.
         logos::ScopedModuleStateFlush stateFlusher;
@@ -1393,18 +1593,42 @@ namespace ModuleManager {
             spdlog::warn("Cannot unload module (not loaded): {}", name);
             return false;
         }
-        if (address.isDefaultInstance()) {
-            return withDependents
-                ? unloadModuleWithDependentsInternalLocked(address.moduleName)
-                : unloadModuleInternalLocked(address);
+
+        // Build the set of modules that need to come down: the target plus
+        // every currently-loaded recursive dependent. Materialise the loaded
+        // set into a hash once so the membership check below is O(1).
+        std::vector<std::string> loadedNames = registryInstance().loadedModuleNames();
+        std::unordered_set<std::string> loaded(loadedNames.begin(), loadedNames.end());
+
+        // Reverse dependency walk against the in-process graph. ModuleRegistry
+        // keeps ModuleInfo::dependents in sync with ModuleInfo::dependencies
+        // across every discovery pass, so we don't need a disk-backed query.
+        std::vector<std::string> dependents = registryInstance().moduleDependents(name, /*recursive=*/true);
+
+        std::vector<std::string> teardownSet;
+        std::unordered_set<std::string> teardownSetMembers;
+        teardownSet.push_back(name);
+        teardownSetMembers.insert(name);
+        for (const std::string& d : dependents) {
+            if (loaded.count(d) && teardownSetMembers.insert(d).second)
+                teardownSet.push_back(d);
         }
-        if (withDependents) {
-            spdlog::warn("Cannot cascade unload explicit module runtime: {}",
-                         addressLabel(address));
-            return false;
+
+        // Order leaves-first: resolve load-order for the teardown set, then
+        // reverse. Dependents come down before the modules they depend on.
+        // Teardown is best-effort — we use .order and ignore resolution errors
+        // (missing deps / cycles) because we need to tear down what we can.
+        std::vector<std::string> loadOrder = DependencyResolver::resolve(
+            teardownSet,
+            [](const std::string& n) { return registryInstance().isKnown(n); },
+            [](const std::string& n) { return registryInstance().moduleDependencies(n); }
+        ).order;
+        std::vector<std::string> teardownOrder;
+        std::unordered_set<std::string> teardownOrderMembers;
+        for (auto it = loadOrder.rbegin(); it != loadOrder.rend(); ++it) {
+            if (teardownSetMembers.count(*it) && teardownOrderMembers.insert(*it).second)
+                teardownOrder.push_back(*it);
         }
-        return unloadModuleInternalLocked(address);
-    }
 
         // Safety net: any members not seen by the resolver (shouldn't happen,
         // but don't silently skip them) go to the end.

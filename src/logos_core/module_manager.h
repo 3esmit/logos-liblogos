@@ -48,8 +48,7 @@ namespace ModuleManager {
                              const std::string& transportSetJson);
 
     // Address-aware transport override. An empty instance ID selects the
-    // legacy/default runtime; a non-empty ID stays isolated from sibling
-    // instances of the same module package.
+    // legacy/default runtime; a non-empty ID stays isolated from siblings.
     void setModuleInstanceTransports(const std::string& moduleName,
                                      const std::string& instanceId,
                                      const std::string& transportSetJson);
@@ -76,6 +75,9 @@ namespace ModuleManager {
     bool loadModuleWithDependencies(const char* moduleName,
                                     DependencyResolver::OptionalLoad optionalLoad =
                                         DependencyResolver::OptionalLoad::OrderOnly);
+    bool loadModuleInstance(const char* moduleName,
+                            const char* instanceId,
+                            bool withDependencies);
     bool initializeCapabilityModule();
 
     // Loads modules_state when installed, arming the lifecycle feed. Returns
@@ -83,10 +85,6 @@ namespace ModuleManager {
     // liblogos pays nothing for it not being there.
     bool initializeModulesState();
     bool unloadModule(const char* moduleName);
-
-    // Explicit-instance unload never cascades package dependents: dependency
-    // metadata is package-scoped and those shared default runtimes may serve
-    // sibling instances. withDependents is accepted only for the default path.
     bool unloadModuleInstance(const char* moduleName,
                               const char* instanceId,
                               bool withDependents);
@@ -156,6 +154,9 @@ namespace ModuleManager {
     std::string getModulesInfoJson();
     // char* variant. Caller owns the returned string. Never null.
     char* getModulesInfoCStr();
+
+    std::string getModuleInstancesInfoJson();
+    char* getModuleInstancesInfoCStr();
 
     // The startup snapshot exactly as it goes over the wire to modules_state
     // (a ModuleListing: {modules, partial, seq}), serialized. No RPC — exposed
