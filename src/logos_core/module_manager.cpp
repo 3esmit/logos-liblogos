@@ -965,8 +965,11 @@ namespace {
         // process; whether the plugin behind it loaded is a fact only the child
         // has. Claiming it here without asking is what reported a module whose
         // plugin never loaded as loaded, with the failure surfacing hops away.
-        const LogosCore::LoadOutcome outcome = loader->awaitLoad(
-            name, hostStaysSilent().load() ? kSilentHostGrace : kLoadVerdictTimeout);
+        const auto loadVerdictTimeout =
+            hostStaysSilent().load() ? kSilentHostGrace : kLoadVerdictTimeout;
+        const LogosCore::LoadOutcome outcome = address.isDefaultInstance()
+            ? loader->awaitLoad(name, loadVerdictTimeout)
+            : instanceLoader->awaitLoadInstance(address, loadVerdictTimeout);
 
         if (outcome.verdict == LogosCore::LoadVerdict::Failed) {
             spdlog::error("Failed to load module {}: {}", name, outcome.reason);

@@ -90,6 +90,16 @@ public:
 
     virtual std::unordered_map<ModuleAddress, int64_t, ModuleAddressHash>
     getAllInstancePids() const = 0;
+
+    // Wait for the exact runtime to report whether its plugin loaded. The
+    // default preserves compatibility with older instance-aware loaders and
+    // leaves explicit instances Unknown when they cannot observe the verdict.
+    virtual LoadOutcome awaitLoadInstance(
+        const ModuleAddress& address, std::chrono::milliseconds timeout)
+    {
+        if (address.isDefaultInstance()) return awaitLoad(address.moduleName, timeout);
+        return {};
+    }
 };
 
 } // namespace LogosCore

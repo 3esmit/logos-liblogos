@@ -4,32 +4,33 @@
   inputs = {
     logos-nix.url = "github:logos-co/logos-nix";
     nixpkgs.follows = "logos-nix/nixpkgs";
-    logos-cpp-sdk.url = "github:3esmit/logos-cpp-sdk?rev=790030b442f3fc210f973fb2b8807e3495ee9724";
+    logos-cpp-sdk.url = "github:3esmit/logos-cpp-sdk?rev=a4b7550470b0ad874bb7c20ed95df8e5a7bdd8c8";
     logos-cpp-sdk.inputs.logos-protocol.follows = "logos-protocol";
-    logos-protocol.url = "github:logos-co/logos-protocol";
+    logos-protocol.url = "github:3esmit/logos-protocol?rev=3f307064aea1a7a6747f0374b8216c0549d1aceb";
     # ONE logos-protocol, and ONE logos-qt-host, in the closure. qt-host bakes
     # sizeof(LogosAPIClient) into its own `operator new` while logos-protocol
     # defines the constructor, so a second protocol here is an 8-byte heap
     # overrun on every getClient(), not a version disagreement. Without these,
     # an --override-input on our logos-protocol reaches only the direct edge and
     # leaves qt-sdk's and plugin-qt's copies behind.
-    logos-qt-sdk.url = "github:logos-co/logos-qt-sdk";
+    logos-qt-sdk.url = "github:3esmit/logos-qt-sdk?rev=3b68867920c89d54edbc8fca39340dcc8efe4cd8";
     logos-qt-sdk.inputs.logos-protocol.follows = "logos-protocol";
     logos-qt-sdk.inputs.logos-plugin-qt.follows = "logos-plugin-qt";
     logos-plugin-qt.url = "github:logos-co/logos-plugin-qt";
     logos-plugin-qt.inputs.logos-protocol.follows = "logos-protocol";
-    logos-capability-module.url = "github:logos-co/logos-capability-module";
+    logos-capability-module.url = "github:3esmit/logos-capability-module?rev=4ccbc36c0347dc2b9aa7c06c349ca138c927ba92";
     logos-modules-state-module.url = "github:logos-co/logos-modules-state-module";
     logos-module.url = "github:logos-co/logos-module";
     process-stats.url = "github:logos-co/process-stats";
-    logos-container.url = "github:3esmit/logos-container?rev=a8eb5dddce34541abaeb213efcd61657cb924b37";
+    logos-container.url = "github:3esmit/logos-container?rev=c211935f732540f81fe9da6c3522db1c5979302d";
     logos-module-loader.url = "github:logos-co/logos-module-loader";
-    default-container.url = "github:logos-co/logos-container-subprocess";
+    default-container.url = "github:3esmit/logos-container-subprocess?rev=49db9d3f919be0d358c69ce8fbca2592e06743f1";
+    default-container.inputs.logos-container.follows = "logos-container";
     # The default loader LINKS logos-protocol, and this process loads it, so a
     # revision of its own means two of every function-local static in there.
     # Only the protocol-carrying chain follows: the rest of its inputs are lock
     # size, not correctness, and deep follows have broken this repo before.
-    default-module-loader.url = "github:logos-co/logos-module-loader-qt";
+    default-module-loader.url = "github:logos-co/logos-module-loader-qt?rev=56359d958ebb936fe578b7339f1c3b56194d4a3a";
     default-module-loader.inputs.logos-protocol.follows = "logos-protocol";
     default-module-loader.inputs.logos-cpp-sdk.follows = "logos-cpp-sdk";
     default-module-loader.inputs.logos-qt-sdk.follows = "logos-qt-sdk";

@@ -124,6 +124,14 @@ struct FakeModuleLoader : public InstanceAwareModuleLoader {
         return result;
     }
 
+    LoadOutcome awaitLoadInstance(const ModuleAddress& address,
+                                  std::chrono::milliseconds) override {
+        instanceAwaitCalls.push_back(address);
+        return activeInstances.count(address) > 0
+            ? LoadOutcome{LoadVerdict::Loaded, {}}
+            : LoadOutcome{LoadVerdict::Failed, "not running"};
+    }
+
     std::function<void(const ModuleAddress&)> callbackFor(const ModuleAddress& address) const {
         const auto it = instanceCallbacks.find(address);
         return it == instanceCallbacks.end()
@@ -137,6 +145,7 @@ struct FakeModuleLoader : public InstanceAwareModuleLoader {
     std::vector<std::string>                         terminateCalls;
     std::vector<ModuleDescriptor>                     instanceLoadCalls;
     std::vector<std::pair<ModuleAddress, std::string>> instanceTokenCalls;
+    std::vector<ModuleAddress>                        instanceAwaitCalls;
     std::vector<ModuleAddress>                        instanceTerminateCalls;
     int                                              terminateAllCount = 0;
 
@@ -315,6 +324,9 @@ TEST_F(ModuleLoaderAbstractionTest,
                   beta.moduleName.c_str(), beta.instanceId.c_str(), false), 1);
 
     ASSERT_EQ(fake->instanceLoadCalls.size(), 2u);
+    ASSERT_EQ(fake->instanceAwaitCalls.size(), 2u);
+    EXPECT_EQ(fake->instanceAwaitCalls[0], alpha);
+    EXPECT_EQ(fake->instanceAwaitCalls[1], beta);
     EXPECT_EQ(fake->instanceLoadCalls[0].address(), alpha);
     EXPECT_EQ(fake->instanceLoadCalls[1].address(), beta);
     EXPECT_EQ(fake->instanceLoadCalls[0].transportSetJson, "[\"alpha-transport\"]");

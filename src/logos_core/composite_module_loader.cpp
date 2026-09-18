@@ -66,6 +66,14 @@ std::unordered_map<std::string, int64_t> CompositeModuleLoader::getAllPids() con
     return container_->getAllPids();
 }
 
+LoadOutcome CompositeModuleLoader::awaitLoadInstance(
+    const ModuleAddress& address, std::chrono::milliseconds timeout)
+{
+    InstanceAwareModuleContainer* container = instanceContainer();
+    if (!container) return {};
+    return container->awaitLoadInstance(address, timeout);
+}
+
 InstanceAwareModuleContainer* CompositeModuleLoader::instanceContainer() const
 {
     return dynamic_cast<InstanceAwareModuleContainer*>(container_.get());
